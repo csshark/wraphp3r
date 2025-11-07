@@ -272,13 +272,11 @@ class LFIWrapperScanner {
   \ V  V /| | | (_| | |_) | | | | |_) |__) | |   
    \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
                     |_|         |_|              
-    PHP Wrappers LFI Tester 
-                                 by csshark
                                                                   
         ", 'cyan') . "
-        " . $this->color("LFI Wrapper Scanner v1.0", 'yellow') . "
-        " . $this->color("Advanced PHP Wrapper-based LFI Detection Tool", 'blue') . "
-        " . $this->color("Author: Security Researcher", 'magenta') . "
+        " . $this->color("LFI Wrapper Scanner", 'yellow') . "
+        " . $this->color("PHP Wrapper-based LFI Detection Tool", 'blue') . "
+        " . $this->color("Author: csshark", 'magenta') . "
         
         ";
         
@@ -295,6 +293,7 @@ $scanner->showBanner();
 
 if ($argc < 3) {
     echo "Usage: php " . $argv[0] . " <target_url> <parameter> [test_file]\n";
+    echo "\n"; 
     echo "Example: php " . $argv[0] . " \"http://example.com/vuln.php\" \"file\" \"/etc/passwd\"\n";
     echo "Example: php " . $argv[0] . " \"http://example.com/page.php?param=value\" \"file\" \"/etc/hosts\"\n";
     exit(1);
