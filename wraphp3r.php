@@ -265,18 +265,20 @@ class LFIWrapperScanner {
     }
     
     public function showBanner() {
-        $banner = "
-        " . $this->color("
-                           _          _____      
- __      ___ __ __ _ _ __ | |__  _ __|___ / _ __ 
- \ \ /\ / / '__/ _` | '_ \| '_ \| '_ \ |_ \| '__|
-  \ V  V /| | | (_| | |_) | | | | |_) |__) | |   
-   \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
-                    |_|         |_|              
-    PHP Wrappers LFI Tester 
-                                 by csshark
+        $banner = $this->color("
+   _      ______ _____    _       __        __    _                  
+  | |    |  ____|  __ \\  | |      \\ \\      / /   | |                 
+  | |    | |__  | |__) | | |       \\ \\ /\\ / /___ | |__   ___  _ __   
+  | |    |  __| |  _  /  | |        \\ V  V // _ \\| '_ \\ / _ \\| '_ \\  
+  | |____| |____| | \\ \\  | |____     \\_/\\_/ \\___/| |_) | (_) | | | | 
+  |______|______|_|  \\_\\ |______|                 |_.__/ \\___/|_| |_| 
                                                                   
-        ", 'cyan');
+        ", 'cyan') . "
+        " . $this->color("LFI Wrapper Scanner v1.0", 'yellow') . "
+        " . $this->color("Advanced PHP Wrapper-based LFI Detection Tool", 'blue') . "
+        " . $this->color("Author: Security Researcher", 'magenta') . "
+        
+        ";
         
         echo $banner;
     }
