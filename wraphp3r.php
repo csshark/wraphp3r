@@ -303,19 +303,18 @@ class LFIWrapperScanner {
     }
     
     public function showBanner() {
-        $banner = "
-        " . $this->color("
-  _      ______ _____    _       __        __    _                  
- | |    |  ____|  __ \\  | |      \\ \\      / /   | |                 
- | |    | |__  | |__) | | |       \\ \\ /\\ / /___ | |__   ___  _ __   
- | |    |  __| |  _  /  | |        \\ V  V // _ \\| '_ \\ / _ \\| '_ \\  
- | |____| |____| | \\ \\  | |____     \\_/\\_/ \\___/| |_) | (_) | | | | 
- |______|______|_|  \\_\\ |______|                 |_.__/ \\___/|_| |_| 
+        $banner = $this->color("
+                           _          _____      
+ __      ___ __ __ _ _ __ | |__  _ __|___ / _ __ 
+ \ \ /\ / / '__/ _` | '_ \| '_ \| '_ \ |_ \| '__|
+  \ V  V /| | | (_| | |_) | | | | |_) |__) | |   
+   \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
+                    |_|         |_|              
                                                                   
         ", 'cyan') . "
-        " . $this->color("LFI Wrapper Scanner v1.0", 'yellow') . "
-        " . $this->color("Advanced PHP Wrapper-based LFI Detection Tool", 'blue') . "
-        " . $this->color("Author: Security Researcher", 'magenta') . "
+        " . $this->color("LFI Wrapper Scanner", 'yellow') . "
+        " . $this->color("PHP Wrapper-based LFI Detection Tool", 'blue') . "
+        " . $this->color("Author: csshark", 'magenta') . "
         
         ";
         
@@ -323,7 +322,6 @@ class LFIWrapperScanner {
     }
 }
 
-// Obsługa argumentów wiersza poleceń
 if (php_sapi_name() !== 'cli') {
     die("This script must be run from command line\n");
 }
