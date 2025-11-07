@@ -274,7 +274,7 @@ class LFIWrapperScanner {
    \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
                     |_|         |_|              
     PHP Wrappers LFI Tester 
-                          made with <3 by csshark
+                                 by csshark
                                                                   
         ", 'cyan');
         
