@@ -302,18 +302,18 @@ class LFIWrapperScanner {
             'extension=' => ['confidence' => 'medium', 'type' => 'LFI', 'file' => 'php.ini'],
         ];
         
-        // Check for exact content matches
+        // chck for exact content matches
         foreach ($indicators as $pattern => $info) {
             if (strpos($content, $pattern) !== false) {
                 return $info;
             }
         }
         
-        // Check for base64 encoded content
+        // chck for base64 encoded content
         if (preg_match('/^[A-Za-z0-9+\/=]{20,}$/', substr($content, 0, 200))) {
             $decoded = base64_decode(substr($content, 0, 500), true);
             if ($decoded !== false) {
-                // Check decoded content
+                // chck decoded content
                 foreach ($indicators as $pattern => $info) {
                     if (strpos($decoded, $pattern) !== false) {
                         return ['confidence' => 'high', 'type' => 'LFI', 'file' => 'base64 encoded ' . $info['file']];
@@ -322,7 +322,7 @@ class LFIWrapperScanner {
             }
         }
         
-        // Check for ROT13 content
+        // ROT13 content
         $rot13 = str_rot13(substr($content, 0, 500));
         foreach ($indicators as $pattern => $info) {
             if (strpos($rot13, $pattern) !== false) {
@@ -330,7 +330,7 @@ class LFIWrapperScanner {
             }
         }
         
-        // Check response length (unusual lengths might indicate success)
+        // chck response length (unusual lengths might indicate success)
         $contentLength = strlen($content);
         if ($contentLength > 1000 && $contentLength < 10000) {
             return ['confidence' => 'low', 'type' => 'potential', 'file' => 'unusual response size'];
@@ -348,7 +348,7 @@ class LFIWrapperScanner {
         }
         echo str_repeat("-", 80) . "\n";
         
-        // Test connection first
+        // test connection 
         $this->printStatus("Testing connection to target...", 'testing');
         $testResponse = $this->testUrl($targetUrl);
         
@@ -378,7 +378,7 @@ class LFIWrapperScanner {
                 continue;
             }
             
-            // Verify if actually vulnerable
+            // ? actually vulnerable
             $verification = $this->verifyVulnerability($response, $wrapper);
             
             if ($verification) {
@@ -411,7 +411,7 @@ class LFIWrapperScanner {
                 
                 $this->saveFinding($results[count($results)-1]);
                 
-                // Add to verified vulnerabilities
+                // verified vulnerabilities
                 $this->verifiedVulnerabilities[] = $results[count($results)-1];
             } else {
                 $this->printStatus("✗ Not vulnerable - " . $wrapper, 'error');
@@ -461,19 +461,18 @@ class LFIWrapperScanner {
     }
     
     public function showBanner() {
-        $banner = "
-        " . $this->color("
-  _      ______ _____    _       __        __    _                  
- | |    |  ____|  __ \\  | |      \\ \\      / /   | |                 
- | |    | |__  | |__) | | |       \\ \\ /\\ / /___ | |__   ___  _ __   
- | |    |  __| |  _  /  | |        \\ V  V // _ \\| '_ \\ / _ \\| '_ \\  
- | |____| |____| | \\ \\  | |____     \\_/\\_/ \\___/| |_) | (_) | | | | 
- |______|______|_|  \\_\\ |______|                 |_.__/ \\___/|_| |_| 
+        $banner = $this->color("
+                           _          _____      
+ __      ___ __ __ _ _ __ | |__  _ __|___ / _ __ 
+ \ \ /\ / / '__/ _` | '_ \| '_ \| '_ \ |_ \| '__|
+  \ V  V /| | | (_| | |_) | | | | |_) |__) | |   
+   \_/\_/ |_|  \__,_| .__/|_| |_| .__/____/|_|   
+                    |_|         |_|              
                                                                   
         ", 'cyan') . "
-        " . $this->color("LFI Wrapper Scanner v2.0", 'yellow') . "
-        " . $this->color("Advanced PHP Wrapper-based LFI Detection with Verification", 'blue') . "
-        " . $this->color("Author: Security Researcher", 'magenta') . "
+        " . $this->color("LFI Wrapper Scanner", 'yellow') . "
+        " . $this->color("PHP Wrapper-based LFI Detection Tool", 'blue') . "
+        " . $this->color("Author: csshark", 'magenta') . "
         
         ";
         
