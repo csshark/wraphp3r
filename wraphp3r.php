@@ -276,12 +276,7 @@ class LFIWrapperScanner {
     PHP Wrappers LFI Tester 
                           made with <3 by csshark
                                                                   
-        ", 'cyan') . "
-        " . $this->color("LFI Wrapper Scanner v1.0", 'yellow') . "
-        " . $this->color("Advanced PHP Wrapper-based LFI Detection Tool", 'blue') . "
-        " . $this->color("Author: Security Researcher", 'magenta') . "
-        
-        ";
+        ", 'cyan');
         
         echo $banner;
     }
