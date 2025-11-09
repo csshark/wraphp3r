@@ -5,6 +5,7 @@ Simple and powerful tool for testing LFI (Local File Inclusion) vulnerabilities 
 ## Description
 
 Quick scanner that tests URLs for LFI vulnerabilities using comprehensive techniques:
+- PHP Version detection to use perfect payload
 - PHP filter wrappers (base64, iconv, zlib, rot13, etc.)
 - Path traversal payloads with various encoding bypasses
 - Data wrappers for RCE testing
