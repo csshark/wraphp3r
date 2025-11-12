@@ -43,7 +43,7 @@ class LFIWrapperScanner:
         env_proxies = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
         for env_var in env_proxies:
             if env_proxy := os.getenv(env_var):
-                self.print_status(f"Detected proxy: {env_proxy}", 'info')
+                self.print_status(f"Detected env proxy.", 'info')
                 return {'http': env_proxy, 'https': env_proxy}
         
         return None
