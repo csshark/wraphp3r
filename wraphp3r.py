@@ -362,10 +362,10 @@ class LFIWrapperScanner:
             'database.php.bak',
         ]
         
-        # Dodaj target directory jeśli podano
+        # target dir flag 
         if self.target_dir:
             test_files.insert(0, self.target_dir)
-            # Dodaj też kombinacje z traversal do target directory
+            # path traversal
             for traversal in traversal_payloads[:5]:
                 test_files.append(traversal + self.target_dir.lstrip('/'))
         
@@ -479,7 +479,7 @@ class LFIWrapperScanner:
         return version_specific
 
     def verify_vulnerability(self, content: str, wrapper: str):
-        # False positive reduction - sprawdź czy to nie jest normalna strona
+        # False positive reduction
         false_positives = [
             '<!DOCTYPE html>',
             '<html',
@@ -495,7 +495,7 @@ class LFIWrapperScanner:
             'Page not found',
         ]
         
-        # Sprawdź czy zawartość nie wygląda jak normalna strona HTML
+        # confirm false-postiive
         content_lower = content.lower()
         if any(fp.lower() in content_lower for fp in false_positives[:5]):
             return None
@@ -539,20 +539,20 @@ class LFIWrapperScanner:
             if pattern in content:
                 return info
         
-        # Sprawdź base64
+        # base64
         if len(content) > 20 and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r' for c in content[:200]):
             try:
                 decoded = base64.b64decode(content[:400]).decode('utf-8', errors='ignore')
                 for pattern, info in indicators.items():
                     if pattern in decoded:
                         return info
-                # Sprawdź czy zdekodowany base64 zawiera znaki systemowe
+                # decode base64 
                 if 'root:' in decoded or '<?php' in decoded or 'Linux' in decoded:
                     return {'confidence': 'medium', 'type': 'LFI', 'file': 'base64 encoded content'}
             except:
                 pass
         
-        # Sprawdź ROT13
+        # ROT13
         def rot13(text):
             result = []
             for char in text:
@@ -569,7 +569,7 @@ class LFIWrapperScanner:
             if pattern in rot13_content:
                 return {'confidence': 'high', 'type': 'LFI', 'file': f"ROT13 encoded {info['file']}"}
         
-        # Specjalne przypadki dla expect i data wrappers
+        # special cases
         if wrapper.startswith('expect://'):
             if 'www-data' in content or 'root' in content or 'uid=' in content:
                 return {'confidence': 'high', 'type': 'RCE', 'file': 'command execution'}
@@ -668,7 +668,7 @@ class LFIWrapperScanner:
                     |_|         |_|              
 {Color.END}
         {Color.YELLOW}LFI Wrapper Scanner{Color.END}
-        {Color.BLUE}Enhanced with expect://, data:// and false positive reduction{Color.END}
+        {Color.BLUE}PHP Wrapper-based LFI Detection Tool{Color.END}
         {Color.MAGENTA}Author: csshark{Color.END}
         
         """
@@ -690,7 +690,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Utwórz scanner z opcjonalnym target_dir
     scanner = LFIWrapperScanner(proxy=args.proxy, target_dir=args.target_dir)
     
     if args.proxy:
