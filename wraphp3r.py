@@ -597,6 +597,10 @@ class LFIWrapperScanner:
                     color = Color.RED if verification['confidence'] == 'high' else Color.YELLOW
                     self.print_status(f"✓ VULNERABLE - Parameter: {parameter} | Payload: {wrapper}", 'success')
                     self.print_status(f"  → Type: {verification['type']} | Confidence: {verification['confidence']} | File: {verification['file']}", 'verified')
+
+                    self.print_status("Body:", 'info')
+                    preview = response.text[:500] + "..." if len(response.text) > 500 else response.text
+                    print (f"{Color.CYAN}{preview}{Color.END}")
                     return True
                 else:
                     self.print_status(f"✗ Not vulnerable - Parameter: {parameter} | Payload: {wrapper}", 'error')
