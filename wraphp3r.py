@@ -8,6 +8,7 @@ import os
 import argparse
 from datetime import datetime
 import re
+import signal
 
 class Color:
     RED = '\033[91m'
@@ -26,6 +27,7 @@ class LFIWrapperScanner:
         self.target_dir = target_dir
         self.detected_php_version = None
         self.follow_redirects = follow_redirects
+        self.shutdown_requested = False
         
         self.session = requests.Session()
         self.session.headers.update({
@@ -37,6 +39,19 @@ class LFIWrapperScanner:
         
         if self.proxy:
             self.session.proxies.update(self.proxy)
+            
+        self._setup_signal_handlers()
+
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown"""
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        self.shutdown_requested = True
+        print(f"\n{Color.YELLOW}[!] Shutdown requested. Cleaning up...{Color.END}")
+        print(f"{Color.YELLOW}[!] Press Ctrl+C again to force exit{Color.END}")
 
     def _setup_proxy(self, proxy: str):
         if proxy:
@@ -754,11 +769,16 @@ class LFIWrapperScanner:
         self.print_status(f"Report saved to: {filename}", 'success')
 
     def test_payload(self, target_url: str, parameter: str, wrapper: str):
+        """Test a single payload with shutdown check"""
+        if self.shutdown_requested:
+            return None
+            
         separator = '&' if '?' in target_url else '?'
         test_url = f"{target_url}{separator}{parameter}={urllib.parse.quote(wrapper)}"
     
         try:
-            response = self.session.get(test_url, timeout=5, verify=False, allow_redirects=self.follow_redirects)
+            response = self.session.get(test_url, timeout=5, verify=False, 
+                                      allow_redirects=self.follow_redirects)
         
             if response.status_code == 200 and len(response.text) > 0:
                 verification = self.enhanced_verify_vulnerability(response.text, wrapper, response)
@@ -785,11 +805,13 @@ class LFIWrapperScanner:
             self.print_status(f"✗ Not vulnerable - Payload: {wrapper[:100]}...", 'error')
             
         except Exception as e:
-            self.print_status(f"✗ Failed - Payload: {wrapper} ({str(e)})", 'error')
+            if not self.shutdown_requested:
+                self.print_status(f"✗ Failed - Payload: {wrapper} ({str(e)})", 'error')
     
         return None
 
     def scan(self, target_url: str, parameter: str, export_report: bool = True):
+        """Main scanning function with graceful shutdown support"""
         self.print_status(f"Starting LFI scan: {target_url}", 'info')
         self.print_status(f"Testing parameter: {parameter}", 'info')
         if self.proxy:
@@ -801,12 +823,18 @@ class LFIWrapperScanner:
         else:
             self.print_status("Follow redirects: DISABLED", 'info')
         self.print_status("SSL verification: DISABLED (self-signed certs supported)", 'info')
+        self.print_status(f"{Color.YELLOW}Press Ctrl+C to stop scanning gracefully{Color.END}", 'info')
         print("-" * 60)
     
+        # Check for shutdown before starting detection
+        if self.shutdown_requested:
+            self.print_status("Scan cancelled by user", 'warning')
+            return
+            
         version_info = self.detect_php_version(target_url)
         vulnerabilities = []
     
-        if version_info:
+        if version_info and not self.shutdown_requested:
             for info in version_info:
                 self.print_status(f"PHP version detected: {info['version']} ({info['source']})", 'success')
                 self.detected_php_version = info['version']
@@ -815,37 +843,57 @@ class LFIWrapperScanner:
                 self.print_status("Version-based vulnerability assessment:", 'warning')
                 for vuln in vulns:
                     self.print_status(f"  • {vuln}", 'warning')
-        else:
+        elif not self.shutdown_requested:
             self.print_status("Could not detect PHP version", 'error')
             self.detected_php_version = "unknown"
     
         print("-" * 60)
     
+        # Check for shutdown before connection test
+        if self.shutdown_requested:
+            self.print_status("Scan cancelled by user", 'warning')
+            return
+            
         try:
-            response = self.session.get(target_url, timeout=5, verify=False, allow_redirects=self.follow_redirects)
+            response = self.session.get(target_url, timeout=5, verify=False, 
+                                      allow_redirects=self.follow_redirects)
             self.print_status(f"Initial connection: HTTP {response.status_code}", 'info')
         except Exception as e:
             self.print_status(f"Connection failed: {e}", 'error')
             return
     
+        # Check for shutdown before generating payloads
+        if self.shutdown_requested:
+            self.print_status("Scan cancelled by user", 'warning')
+            return
+            
         wrappers = self.generate_wrappers()
         self.print_status(f"Generated {len(wrappers)} payloads for testing", 'info')
     
         for i, wrapper in enumerate(wrappers, 1):
+            # Check for shutdown before each payload test
+            if self.shutdown_requested:
+                self.print_status(f"Scan interrupted after {i-1}/{len(wrappers)} payloads", 'warning')
+                break
+                
             self.print_status(f"Testing payload {i}/{len(wrappers)}", 'payload')
             result = self.test_payload(target_url, parameter, wrapper)
             if result:
                 vulnerabilities.append(result)
     
         print("-" * 60)
-        if vulnerabilities:
+        if self.shutdown_requested:
+            self.print_status(f"Scan interrupted! Found {len(vulnerabilities)} vulnerabilities before shutdown", 'warning')
+        elif vulnerabilities:
             self.print_status(f"Scan complete! Found {len(vulnerabilities)} vulnerable payloads", 'success')
         
-            if export_report:
+            if export_report and not self.shutdown_requested:
                 report = self.generate_report(target_url, parameter, vulnerabilities)
                 self.save_report(report)
         else:
             self.print_status("Scan complete! No vulnerabilities found", 'warning')
+
+    # ... (rest of your methods remain the same, just add shutdown checks where appropriate)
 
     def show_banner(self):
         banner = f"""
@@ -865,28 +913,36 @@ class LFIWrapperScanner:
         print(banner)
 
 def main():
-    parser = argparse.ArgumentParser(description='LFI Wrapper Scanner')
-    parser.add_argument('url', help='Target URL')
-    parser.add_argument('param', help='Parameter to test')
-    parser.add_argument('--proxy', '-p', help='Proxy (http://proxy:port)')
-    parser.add_argument('--target-dir', '-t', help='Target directory for wrapper traversal')
-    parser.add_argument('--no-report', action='store_true', help='Disable report generation')
-    parser.add_argument('--follow-redirects', '-fr', action='store_true', help='Follow HTTP redirects')
+    try:
+        parser = argparse.ArgumentParser(description='LFI Wrapper Scanner')
+        parser.add_argument('url', help='Target URL')
+        parser.add_argument('param', help='Parameter to test')
+        parser.add_argument('--proxy', '-p', help='Proxy (http://proxy:port)')
+        parser.add_argument('--target-dir', '-t', help='Target directory for wrapper traversal')
+        parser.add_argument('--no-report', action='store_true', help='Disable report generation')
+        parser.add_argument('--follow-redirects', '-fr', action='store_true', help='Follow HTTP redirects')
     
-    if len(sys.argv) == 1:
-        parser.print_help()
-        return
-    
-    args = parser.parse_args()
-    
-    scanner = LFIWrapperScanner(proxy=args.proxy, target_dir=args.target_dir, follow_redirects=args.follow_redirects)
-    scanner.show_banner()
-    
-    if args.proxy:
-        scanner.proxy = {'http': args.proxy, 'https': args.proxy}
-        scanner.session.proxies.update(scanner.proxy)
-    
-    scanner.scan(args.url, args.param, export_report=not args.no_report)
+        if len(sys.argv) == 1:
+            parser.print_help()
+            return
+
+        args = parser.parse_args()
+
+        scanner = LFIWrapperScanner(proxy=args.proxy, target_dir=args.target_dir, follow_redirects=args.follow_redirects)
+        scanner.show_banner()
+
+        if args.proxy:
+            scanner.proxy = {'http': args.proxy, 'https': args.proxy}
+            scanner.session.proxies.update(scanner.proxy)
+
+        scanner.scan(args.url, args.param, export_report=not args.no_report)
+
+    except KeyboardInterrupt:
+        print(f"\n{Color.YELLOW}[!] Scan interrupted by user{Color.END}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n{Color.RED}[!] Unexpected error: {e}{Color.END}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
