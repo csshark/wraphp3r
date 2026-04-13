@@ -16,7 +16,7 @@ Quick scanner that tests URLs for LFI vulnerabilities using comprehensive techni
 ## Clone Repo
 
 ```bash
-git clone https://github.com/csshark/lfi-wrapper-scanner.git
+git clone https://github.com/csshark/wraphp3r.git
 ```
 ## Example usage:
 <pre><code>python3 lfi_scanner.py http://example.com/test.php file</code></pre>
