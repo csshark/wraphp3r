@@ -19,4 +19,4 @@ Quick scanner that tests URLs for LFI vulnerabilities using comprehensive techni
 git clone https://github.com/csshark/wraphp3r.git
 ```
 ## Example usage:
-<pre><code>python3 lfi_scanner.py http://example.com/test.php file</code></pre>
+<pre><code>python3 wraphp3r http://example.com/test.php file</code></pre>
