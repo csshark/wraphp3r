@@ -34,7 +34,7 @@ class Banner:
 \033[0m
         \033[93mLFI Wrapper Scanner v2.0\033[0m
         \033[94mAdvanced PHP Wrapper-based LFI Detection Tool\033[0m
-        \033[95mAuthor: csshark (Enhanced Edition)\033[0m
+        \033[95mAuthor: csshark\033[0m
         """
         )
 
