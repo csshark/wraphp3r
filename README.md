@@ -1,4 +1,4 @@
-# wraphp3r - LFI scanner
+# wraphp3r
 <img src=wraphp3r.png>
 Simple and powerful tool for testing LFI (Local File Inclusion) vulnerabilities via PHP wrappers.
 <p><b>Refactor:</b> Tool has been refactored to version 2.0. Please use <code>-h</code> flag to use new functions.</p>
