@@ -19,6 +19,11 @@ Quick scanner that tests URLs for LFI vulnerabilities using comprehensive techni
 ```bash
 git clone https://github.com/csshark/wraphp3r.git
 ```
+To get information about how to use the tool use:
+```bash
+python3 wraphp3r.py -h
+```
+
 ## Example usage:
 <pre><code>python3 wraphp3r.py -v --smart "http://example.com/image" id</code></pre>
 This will produce <code>/image?id={payload}</code> smart tests.
