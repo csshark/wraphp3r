@@ -25,5 +25,5 @@ python3 wraphp3r.py -h
 ```
 
 ## Example usage:
-<pre><code>python3 wraphp3r.py -v --smart "http://example.com/image" id</code></pre>
+<pre><code>python3 wraphp3r.py -v --smart "http://example.com/image" id --no-validation</code></pre>
 This will produce <code>/image?id={payload}</code> smart tests.
