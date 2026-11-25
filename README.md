@@ -7,12 +7,13 @@ Simple and powerful tool for testing LFI (Local File Inclusion) vulnerabilities 
 
 Quick scanner that tests URLs for LFI vulnerabilities using comprehensive techniques:
 - PHP Version detection to use perfect payload
+- LFI/RFI known CVES
 - PHP filter wrappers (base64, iconv, zlib, rot13, etc.)
 - Path traversal payloads with various encoding bypasses
 - Data wrappers for RCE testing
 - Expect wrappers for command execution
 - RFI payloads for remote file inclusion
-- Support for self-signed certificates and proxy 
+- Support for self-signed certificates and proxy
 
 ## Clone Repo
 
@@ -27,3 +28,9 @@ python3 wraphp3r.py -h
 ## Example usage:
 <pre><code>python3 wraphp3r.py -v --smart "http://example.com/image" id --no-validation</code></pre>
 This will produce <code>/image?id={payload}</code> smart tests.
+
+### Output
+When you decide to use `-v` flag live results will be listed in format as follows:
+| payload | ISSUE_TYPE | Confidence | Content |
+|-----------|-----------|-----------|-----------|
+
