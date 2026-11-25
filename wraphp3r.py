@@ -56,7 +56,7 @@ class Banner:
 \033[0m
         \033[93mwraphp3r v2.0.\033[0m
         \033[94mPHP Wrapper-based LFI Detection Tool\033[0m
-        \033[95mAuthor: csshark | CVE-aware edition\033[0m
+        \033[95mAuthor: csshark\033[0m
         """
         )
 
