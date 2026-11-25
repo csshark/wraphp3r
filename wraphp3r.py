@@ -25,6 +25,23 @@ import html
 from pathlib import Path
 
 
+# pre-compiled regex
+_PASSWD_PATTERNS = [
+    re.compile(r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:\d+:'),          # passwd
+    re.compile(r'^[a-z_][a-z0-9_-]*:\$[0-9]\$[a-zA-Z0-9./]+\$:'),  # shadow hash
+    re.compile(r'^[a-z_][a-z0-9_-]*:!?:\d+:\d+:'),              # shadow
+    re.compile(r'^[a-z_][a-z0-9_-]*:x:\d+:\d+:'),                # explicit x
+    re.compile(r'^[a-z_][a-z0-9_-]*:\*:\d+:\d+:'),               # BSD
+    re.compile(r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:'),                # group
+]
+
+_PASSWD_LINE_MARKERS = (
+    "root:x:", "root:*:", "root::", "daemon:x:", "www-data:x:",
+    ":/bin/bash", ":/bin/sh", ":/sbin/nologin", ":/usr/sbin/",
+    "nobody:x:", ":/home/",
+)
+
+
 class Banner:
     @staticmethod
     def show():
@@ -37,9 +54,9 @@ class Banner:
  !_-(_\\          \\_/\\_/|_| \\__,_| .__/_||_| .__/___/_|  
                                 |_|       |_|
 \033[0m
-        \033[93mwraphp3r v2.0\033[0m
+        \033[93mwraphp3r v2.3.1\033[0m
         \033[94mPHP Wrapper-based LFI Detection Tool\033[0m
-        \033[95mAuthor: csshark\033[0m
+        \033[95mAuthor: csshark | CVE-aware edition\033[0m
         """
         )
 
@@ -53,7 +70,7 @@ class HTTPClient:
         cookies: Optional[Dict] = None,
         headers: Optional[Dict] = None,
         timeout: int = 10,
-        user_agent: str = "wraphper/2.0",
+        user_agent: str = "wraphper/2.3.1",
         max_retries: int = 2
     ):
         self.session = requests.Session()
@@ -79,7 +96,7 @@ class HTTPClient:
         for attempt in range(self.max_retries + 1):
             try:
                 resp = self.session.request(method, url, **kwargs)
-                # Backoff to rate-limit / WAF
+                # Backoff for rate-limit / WAF
                 if resp is not None and resp.status_code in (429, 403):
                     if attempt < self.max_retries:
                         time.sleep(1.0 * (2 ** attempt))
@@ -107,10 +124,9 @@ class HTTPClient:
 
 
 # ---------------------------------------------------------------------------
-# CVE MAPPER – LFI / RFI / LFI→RCE all the stuff
+# CVE MAPPER work this fukin time
 # ---------------------------------------------------------------------------
 class CVEMapper:
-
     CVE_DATABASE: Dict[str, Dict] = {
         "CVE-2024-2961": {
             "name": "CNEXT – glibc iconv overflow via PHP filter chains",
@@ -120,7 +136,7 @@ class CVEMapper:
             "glibc_max": (2, 39),
             "severity": "critical",
             "description": (
-                "PHP filter chains in convert.iconv causing heap overflow in glibc iconv."
+                "PHP filter chains in convert.iconv causing heap overflow in glibc iconv. "
                 "RCE. Requires glibc <= 2.39 i PHP 7.0.0–8.3.7."
             ),
             "poc_payloads": [
@@ -317,9 +333,6 @@ class CVEMapper:
         return results
 
 
-# ---------------------------------------------------------------------------
-# RESPONSE ANALYZER
-# ---------------------------------------------------------------------------
 class ResponseNormalizer:
     @staticmethod
     def normalize(content: str, content_type: str = '') -> str:
@@ -449,7 +462,7 @@ class ResponseAnalyzer:
         return None
 
     @staticmethod
-    def extract_content_snippet(content: str, max_lines: int = 3, max_chars: int = 150) -> Optional[str]:
+    def extract_content_snippet(content: str, max_lines: int = 5, max_chars: int = 300) -> Optional[str]:
         if not content:
             return None
         lines = content.split('\n')
@@ -522,26 +535,32 @@ class ResponseAnalyzer:
             errors['possible_doc_root'] = doc_match.group(1)
         return errors
 
+# passwd cap fixed
     @staticmethod
-    def detect_unix_passwd_format(content: str) -> Tuple[bool, List[str]]:
-        lines = content.split('\n')
-        found = []
-        patterns = [
-            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:\d+:',
-            r'^[a-z_][a-z0-9_-]*:\$[0-9]\$[a-zA-Z0-9./]+\$:',
-            r'^[a-z_][a-z0-9_-]*:!?:\d+:\d+:',
-            r'^[a-z_][a-z0-9_-]*:x:\d+:\d+:',
-            r'^[a-z_][a-z0-9_-]*:\*:\d+:\d+:',
-            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:',
-        ]
-        for line in lines:
+    def detect_unix_passwd_format(content: str, max_entries: int = 500) -> Tuple[bool, List[str]]:
+        if not content:
+            return False, []
+
+        if not any(m in content for m in _PASSWD_LINE_MARKERS):
+            return False, []
+
+        # normalize <br>, <br/>, <br /> → \n
+        text = re.sub(r'<br\s*/?>', '\n', content, flags=re.IGNORECASE)
+        # strip HTML tags
+        text = re.sub(r'<[^>]+>', '', text)
+
+        found: List[str] = []
+        for line in text.split('\n'):
             line = line.strip()
-            for pat in patterns:
-                if re.match(pat, line):
+            if not line:
+                continue
+            for pat in _PASSWD_PATTERNS:
+                if pat.match(line):
                     found.append(line)
                     break
-            if len(found) >= 5:
+            if len(found) >= max_entries:
                 break
+
         return len(found) > 0, found
 
     @staticmethod
@@ -566,7 +585,6 @@ class ResponseAnalyzer:
     def combine_confidence(indicators: List[Dict]) -> float:
         if not indicators:
             return 0.0
-        # deduplicate
         by_type: Dict[str, float] = {}
         for ind in indicators:
             t = ind.get('type', 'UNKNOWN')
@@ -607,9 +625,14 @@ class ResponseAnalyzer:
         if is_passwd:
             indicators.append({'pattern': 'unix_passwd_format', 'type': 'LFI', 'confidence': 0.95})
             result['indicators_found'].append({'pattern': 'unix_passwd_format', 'type': 'LFI', 'confidence': 0.95})
-            result['details']['passwd_lines'] = passwd_lines[:3]
+            result['details']['passwd_lines'] = passwd_lines
+            result['details']['passwd_count'] = len(passwd_lines)
             if not result['content_snippet']:
-                result['content_snippet'] = ' | '.join(passwd_lines[:2])
+                if len(passwd_lines) > 5:
+                    preview = ' | '.join(passwd_lines[:5])
+                    result['content_snippet'] = f"{preview} | ... (+{len(passwd_lines) - 5} more entries)"
+                else:
+                    result['content_snippet'] = ' | '.join(passwd_lines)
 
         has_defines, defines = ResponseAnalyzer.detect_php_defines(normalized)
         if has_defines:
@@ -634,7 +657,7 @@ class ResponseAnalyzer:
                 indicators.append({'pattern': 'path_disclosure', 'type': 'PATH_DISCLOSURE', 'confidence': 0.85})
                 result['indicators_found'].append({'pattern': 'path_disclosure', 'type': 'PATH_DISCLOSURE', 'confidence': 0.85})
 
-        #  CNEXT crash detection (500/502/503 + CSISO2022KR) PLS WORK 
+        # CNEXT crash detection
         if status_code in (500, 502, 503) and "CSISO2022KR" in payload:
             indicators.append({'pattern': 'cnext_crash', 'type': 'CVE-2024-2961', 'confidence': 0.7})
             result['indicators_found'].append({'pattern': 'cnext_crash', 'type': 'CVE-2024-2961', 'confidence': 0.7})
@@ -903,7 +926,6 @@ class PayloadGenerator:
         return list(payloads)
     
     def generate(self) -> Generator[str, None, None]:
-        # cve payloads usage
         for p in self.cve_payloads:
             yield p
 
@@ -1109,7 +1131,6 @@ class LFIScanner:
                 print(f"      \033[93m[!] Warning: detection may crash target PHP-FPM\033[0m")
         
         if not sys.stdin.isatty():
-            # non-interactive (CI / pipeline) – Y for default 
             answer = "y"
             print("\033[93m[!] Non-interactive session – defaulting to Y\033[0m")
         else:
@@ -1141,7 +1162,6 @@ class LFIScanner:
     def scan_payload(self, url: str, param: str, payload: str, candidate_list: List[Finding]):
         if self.stop:
             return
-        # Rate-limit
         if self.delay > 0:
             time.sleep(self.delay)
         with self.lock:
@@ -1177,7 +1197,11 @@ class LFIScanner:
             
             if self.verbose and analysis['confidence'] > 0.3:
                 snippet_info = f"\033[90m | Content: {analysis['content_snippet']}\033[0m" if analysis.get('content_snippet') else ""
-                print(f"\n\033[90m[*] {payload[:60]} | {response.status_code} | {analysis['vulnerability_type']} | {analysis['confidence']:.2f}{snippet_info}\033[0m")
+                # counting multiple entries
+                count_info = ""
+                if analysis['details'].get('passwd_count'):
+                    count_info = f"\033[92m | {analysis['details']['passwd_count']} passwd entries\033[0m"
+                print(f"\n\033[90m[*] {payload[:60]} | {response.status_code} | {analysis['vulnerability_type']} | {analysis['confidence']:.2f}{snippet_info}{count_info}\033[0m")
             
             if analysis['vulnerability_type'] and analysis['confidence'] > 0.5:
                 with self.lock:
@@ -1214,7 +1238,6 @@ class LFIScanner:
             
             verif_payloads = []
             if target:
-                # intensity="light"
                 pg = PayloadGenerator(custom_files=[target], intensity="light")
                 for pl in pg.generate():
                     if pl not in [cand.payload]:
@@ -1280,7 +1303,6 @@ class LFIScanner:
         if not self.baseline:
             print("\033[91m[!] Failed to establish baseline. Continuing anyway.\033[0m")
         
-        # fingerprint
         self.fingerprint_php(url, param)
         if self.detected_php_version:
             relevant = CVEMapper.get_relevant_cves(
@@ -1365,8 +1387,15 @@ class LFIScanner:
             for f in self.findings:
                 verified_mark = " \033[92m[VERIFIED]\033[0m" if f.verified else ""
                 print(f"{f.vuln_type} (conf={f.confidence:.2f}){verified_mark}: {f.payload}")
+                if f.details.get('passwd_count'):
+                    print(f"  \033[92mEntries extracted: {f.details['passwd_count']}\033[0m")
                 if f.content_snippet:
                     print(f"  Content: {f.content_snippet}")
+                if self.verbose and f.details.get('passwd_lines'):
+                    print(f"  \033[90m--- Full passwd dump ({len(f.details['passwd_lines'])} entries) ---\033[0m")
+                    for line in f.details['passwd_lines']:
+                        print(f"  \033[90m{line}\033[0m")
+                    print(f"  \033[90m--- End of dump ---\033[0m")
         else:
             print("\n\033[91m[-] No vulnerabilities found\033[0m")
 
@@ -1386,7 +1415,7 @@ def main():
     parser.add_argument("--data", help="POST data")
     parser.add_argument("--cookie", help="Session cookies")
     parser.add_argument("--header", action="append", help="Add custom headers")
-    parser.add_argument("--user-agent", default="wraphper/2.0", help="Custom User-Agent")
+    parser.add_argument("--user-agent", default="wraphper/2.3.1", help="Custom User-Agent")
     parser.add_argument("--target-file", action="append", help="Target specific file")
     parser.add_argument("--target-dir", help="Target specific directory")
     parser.add_argument("--target-list", help="File with list of targets")
