@@ -54,7 +54,7 @@ class Banner:
  !_-(_\\          \\_/\\_/|_| \\__,_| .__/_||_| .__/___/_|  
                                 |_|       |_|
 \033[0m
-        \033[93mwraphp3r v2.3.1\033[0m
+        \033[93mwraphp3r v2.0.\033[0m
         \033[94mPHP Wrapper-based LFI Detection Tool\033[0m
         \033[95mAuthor: csshark | CVE-aware edition\033[0m
         """
@@ -70,7 +70,7 @@ class HTTPClient:
         cookies: Optional[Dict] = None,
         headers: Optional[Dict] = None,
         timeout: int = 10,
-        user_agent: str = "wraphper/2.3.1",
+        user_agent: str = "wraphper/2.0.",
         max_retries: int = 2
     ):
         self.session = requests.Session()
@@ -1415,7 +1415,7 @@ def main():
     parser.add_argument("--data", help="POST data")
     parser.add_argument("--cookie", help="Session cookies")
     parser.add_argument("--header", action="append", help="Add custom headers")
-    parser.add_argument("--user-agent", default="wraphper/2.3.1", help="Custom User-Agent")
+    parser.add_argument("--user-agent", default="wraphper/2.0.", help="Custom User-Agent")
     parser.add_argument("--target-file", action="append", help="Target specific file")
     parser.add_argument("--target-dir", help="Target specific directory")
     parser.add_argument("--target-list", help="File with list of targets")
