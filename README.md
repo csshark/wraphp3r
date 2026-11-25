@@ -31,6 +31,6 @@ This will produce <code>/image?id={payload}</code> smart tests.
 
 ### Output
 When you decide to use `-v` flag live results will be listed in format as follows:
-| payload | ISSUE_TYPE | Confidence | Content |
+| payload | ISSUE_TYPE | Confidence | Response Content |
 |-----------|-----------|-----------|-----------|
 
